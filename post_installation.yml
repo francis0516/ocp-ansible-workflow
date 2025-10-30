@@ -1,0 +1,74 @@
+---
+- hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Add VM to inventory
+      add_host:
+        name: "{{ vm_ip }}"
+        groups: target_vm
+        ansible_user: root
+        ansible_password: "{{ cloud_init_password | default('password') }}"
+        ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+
+- hosts: target_vm
+  gather_facts: no
+  tasks:
+    - name: Disable SElinux on CentOS
+      replace:
+        path: /etc/sysconfig/selinux
+        regexp: 'SELINUX=enforcing'
+        replace: 'SELINUX=disabled'
+
+    - name: Disable IPv6 on CentOS-9
+      lineinfile:
+        path: /etc/sysctl.conf
+        line: "{{ item }}"
+        state: present
+      with_items:
+        - net.ipv6.conf.all.disable_ipv6 = 1
+        - net.ipv6.conf.default.disable_ipv6 = 1
+
+    - name: Restart systemd-sysctl service
+      service:
+        name: systemd-sysctl
+        state: restarted
+        enabled: no
+
+    - name: Enable IPv6 Changes
+      command: sysctl -p 
+
+    - name: Installation of multiple software packages on RHEL
+      yum: 
+        name: "{{ item }}"
+        state: present
+      with_items:
+        - vim
+        - wget
+        - telnet
+        - nc
+        - rsyslog
+        - net-tools
+        - bind-utils
+        - unzip
+        - traceroute
+        - lsof
+        - psmisc
+        - yum-utils
+        - java-11-openjdk-devel
+        
+    - debug:
+        msg:
+          - "All Basic Application Installation is Successfully Installed"
+
+    - name: Update all packages
+      yum:
+        name: "*"
+        state: latest
+    
+    - name: reboot server 
+      reboot:
+        reboot_timeout: 3000
+        test_command: "uptime"
+      register: uptime
+
+    - debug: var=uptime

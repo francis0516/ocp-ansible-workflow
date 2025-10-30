@@ -1,0 +1,121 @@
+---
+- name: Cleanup all VMs, Services, and Routes from namespace
+  hosts: localhost
+  gather_facts: no
+  vars:
+    vm_project: vm-migration-test
+
+  tasks:
+    - name: Get list of all VMs in namespace
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ vm_project }}"
+        validate_certs: no
+      register: vm_list
+
+    - name: Display VMs to be deleted
+      debug:
+        msg: "Found {{ vm_list.resources | length }} VMs to delete"
+
+    - name: Delete all Virtual Machines
+      kubernetes.core.k8s:
+        state: absent
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ item.metadata.name }}"
+        namespace: "{{ vm_project }}"
+        validate_certs: no
+      loop: "{{ vm_list.resources }}"
+      when: vm_list.resources | length > 0
+
+    - name: Wait for VMs to be fully deleted
+      pause:
+        seconds: 10
+      when: vm_list.resources | length > 0
+
+    - name: Get list of all Services in namespace
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Service
+        namespace: "{{ vm_project }}"
+        validate_certs: no
+      register: service_list
+
+    - name: Display Services to be deleted
+      debug:
+        msg: "Found {{ service_list.resources | length }} Services to delete"
+
+    - name: Delete all Services
+      kubernetes.core.k8s:
+        state: absent
+        api_version: v1
+        kind: Service
+        name: "{{ item.metadata.name }}"
+        namespace: "{{ vm_project }}"
+        validate_certs: no
+      loop: "{{ service_list.resources }}"
+      when: service_list.resources | length > 0
+
+    - name: Get list of all Routes in namespace
+      kubernetes.core.k8s_info:
+        api_version: route.openshift.io/v1
+        kind: Route
+        namespace: "{{ vm_project }}"
+        validate_certs: no
+      register: route_list
+
+    - name: Display Routes to be deleted
+      debug:
+        msg: "Found {{ route_list.resources | length }} Routes to delete"
+
+    - name: Delete all Routes
+      kubernetes.core.k8s:
+        state: absent
+        api_version: route.openshift.io/v1
+        kind: Route
+        name: "{{ item.metadata.name }}"
+        namespace: "{{ vm_project }}"
+        validate_certs: no
+      loop: "{{ route_list.resources }}"
+      when: route_list.resources | length > 0
+
+    - name: Get list of all DataVolumes except golden image
+      kubernetes.core.k8s_info:
+        api_version: cdi.kubevirt.io/v1beta1
+        kind: DataVolume
+        namespace: "{{ vm_project }}"
+        validate_certs: no
+      register: dv_list
+
+    - name: Display DataVolumes to be deleted
+      debug:
+        msg: "Found {{ dv_list.resources | length }} DataVolumes (excluding golden image)"
+
+    - name: Delete DataVolumes (except golden image)
+      kubernetes.core.k8s:
+        state: absent
+        api_version: cdi.kubevirt.io/v1beta1
+        kind: DataVolume
+        name: "{{ item.metadata.name }}"
+        namespace: "{{ vm_project }}"
+        validate_certs: no
+      loop: "{{ dv_list.resources }}"
+      when: 
+        - dv_list.resources | length > 0
+        - item.metadata.name != 'centos9-golden-image'
+
+    - name: Display cleanup summary
+      debug:
+        msg:
+          - "================================================================"
+          - "Henogez Virtual Machine Migration Cleanup Complete Successfully!"
+          - "================================================================"
+          - "Namespace: {{ vm_project }}"
+          - "VMs deleted: {{ vm_list.resources | length }}"
+          - "Services deleted: {{ service_list.resources | length }}"
+          - "Routes deleted: {{ route_list.resources | length }}"
+          - "DataVolumes deleted: {{ (dv_list.resources | length) - 1 if (dv_list.resources | selectattr('metadata.name', 'equalto', 'centos9-golden-image') | list | length > 0) else (dv_list.resources | length) }}"
+          - ""
+          - "Golden image preserved: centos9-golden-image"
+          - "==============================================================="

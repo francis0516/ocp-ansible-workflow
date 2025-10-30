@@ -1,0 +1,38 @@
+---
+- name: Wait for VM SSH and Add to Inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    ssh_timeout: 300
+    # vm_ip, vm_name, vm_project will be passed from previous workflow job via set_stats
+
+  tasks:
+    - name: Display received variables
+      debug:
+        msg:
+          - "VM Name: {{ vm_name }}"
+          - "VM IP: {{ vm_ip }}"
+          - "Project: {{ vm_project }}"
+
+    - name: Wait for SSH to become available
+      wait_for:
+        host: "{{ vm_ip }}"
+        port: 22
+        delay: 10
+        timeout: "{{ ssh_timeout }}"
+        state: started
+
+    - name: Add VM to ansible in-memory inventory
+      add_host:
+        name: "{{ vm_name }}"
+        ansible_host: "{{ vm_ip }}"
+        ansible_user: root
+        ansible_ssh_pass: password
+        ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+        groups: vms
+
+    - name: Display inventory addition
+      debug:
+        msg: "VM {{ vm_name }} ({{ vm_ip }}) added to in-memory inventory in group 'vms'"

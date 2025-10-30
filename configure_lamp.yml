@@ -1,0 +1,67 @@
+---
+- hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Add VM to inventory
+      add_host:
+        name: "{{ vm_ip }}"
+        groups: target_vm
+        ansible_user: root
+        ansible_password: "{{ cloud_init_password | default('password') }}"
+        ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+
+- hosts: target_vm
+  gather_facts: yes
+  become: yes
+  tasks:
+    - name: Install Apache (httpd) package
+      dnf:
+        name: httpd
+        state: present
+
+    - name: Start and enable Apache service
+      systemd:
+        name: httpd
+        state: started
+        enabled: yes
+
+    - name: Verify Apache is running
+      systemd:
+        name: httpd
+      register: httpd_status
+
+    - name: Display Apache service status
+      debug:
+        msg: "Apache service is {{ httpd_status.status.ActiveState }}"
+
+    - name: Test Apache locally from VM
+      uri:
+        url: "http://localhost"
+        return_content: yes
+        status_code: [200, 403]
+      register: local_test
+      ignore_errors: yes
+
+    - name: Display local test result
+      debug:
+        msg: "Local test successful - Apache is responding"
+      when: local_test is succeeded and local_test.status in [200, 403]
+
+    - name: Display local test warning
+      debug:
+        msg: "Warning: Local Apache test failed, but continuing deployment"
+      when: local_test is failed
+
+    - name: Display VM information
+      debug:
+        msg:
+          - "==================================================="
+          - "Henogez Webserver Deployment Complete Successfully!"
+          - "==================================================="
+          - "   Server Details:"
+          - "   Hostname: {{ ansible_hostname }}"
+          - "   IP: {{ ansible_default_ipv4.address }}"
+          - "   Status: {{ httpd_status.status.ActiveState }}"
+          - ""
+          - "   Next Step: Create Service/Route for external access"
+          - "=============================================="
