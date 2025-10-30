@@ -16,8 +16,7 @@
     cloud_init_password: password
     ssh_timeout: 300
     network_attachment: br-ex-network
-    ip_wait_time: 30  # Wait time in seconds for IPs to stabilize
-    ip_wait_time: 30  # Wait time in seconds for IPs to stabilize
+    ip_wait_time: 30
 
   tasks:
     - name: Display VM configuration
@@ -101,7 +100,6 @@
                           eth0:
                             dhcp4: true
                             dhcp6: true
-                            dhcp6: true
                             dhcp4-overrides:
                               use-dns: true
                       userData: |-
@@ -111,20 +109,10 @@
                         chpasswd: { expire: False }
                         ssh_pwauth: True
                         runcmd:
-                          - systemctl enable sshd
-                          - systemctl start sshd
                           - sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
                           - sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
                           - systemctl restart sshd
-                          - systemctl status sshd
-                          - sed -i 's/^#PermitRootLogin./PermitRootLogin yes/' /etc/ssh/sshd_config
-                          - systemctl restart sshd
                           - systemctl enable sshd
-                          - systemctl start sshd
-                          - sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-                          - sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-                          - systemctl restart sshd
-                          - systemctl status sshd
       register: vm_creation
 
     - name: Display VM creation result
@@ -189,11 +177,11 @@
       retries: 30
       delay: 10
 
-    - name: Wait for IP addresses to stabilize (both IPv4 and IPv6)
+    - name: Wait for IP addresses to stabilize
       debug:
         msg: "Waiting {{ ip_wait_time }} seconds for both IPv4 and IPv6 addresses to be assigned..."
 
-    - name: Pause to allow DHCP/SLAAC to complete for both IP versions
+    - name: Pause to allow DHCP/SLAAC to complete
       pause:
         seconds: "{{ ip_wait_time }}"
 
@@ -208,42 +196,7 @@
 
     - name: Debug - Display raw interface information
       debug:
-        msg:
-          - "All interfaces: {{ vmi_network_info.resources[0].status.interfaces }}"
-      when: vmi_network_info.resources is defined and vmi_network_info.resources | length > 0
-
-    - name: Extract all available IP addresses from VM
-      set_fact:
-        vm_ipv4_addresses: "{{ vmi_network_info.resources[0].status.interfaces[0].ipAddresses | default([]) | select('match', '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$') | list }}"
-        vm_ipv6_addresses: "{{ vmi_network_info.resources[0].status.interfaces[0].ipAddresses | default([]) | select('match', '^[0-9a-fA-F:]+$') | list }}"
-        vm_primary_ip: "{{ vmi_network_info.resources[0].status.interfaces[0].ipAddress | default('Not assigned yet') }}"
-      when: vmi_network_info.resources is defined and vmi_network_info.resources | length > 0
-
-    - name: Set VM IP address (prefer IPv4, fallback to IPv6)
-      set_fact:
-        vm_ip: "{{ vm_ipv4_addresses[0] if (vm_ipv4_addresses is defined and vm_ipv4_addresses | length > 0) else (vm_ipv6_addresses[0] if (vm_ipv6_addresses is defined and vm_ipv6_addresses | length > 0) else vm_primary_ip) }}"
-        vm_ip: "{{ vm_ipv4_addresses[0] if vm_ipv4_addresses | length > 0 else vm_primary_ip }}"
-    - name: Wait for IP addresses to stabilize (both IPv4 and IPv6)
-      debug:
-        msg: "Waiting {{ ip_wait_time }} seconds for both IPv4 and IPv6 addresses to be assigned..."
-
-    - name: Pause to allow DHCP/SLAAC to complete for both IP versions
-      pause:
-        seconds: "{{ ip_wait_time }}"
-
-    - name: Refresh VM network information after waiting
-      kubernetes.core.k8s_info:
-        api_version: kubevirt.io/v1
-        kind: VirtualMachineInstance
-        name: "{{ vm_name }}"
-        namespace: "{{ vm_project }}"
-        validate_certs: no
-      register: vmi_network_info
-
-    - name: Debug - Display raw interface information
-      debug:
-        msg:
-          - "All interfaces: {{ vmi_network_info.resources[0].status.interfaces }}"
+        msg: "All interfaces: {{ vmi_network_info.resources[0].status.interfaces }}"
       when: vmi_network_info.resources is defined and vmi_network_info.resources | length > 0
 
     - name: Extract all available IP addresses from VM
@@ -267,17 +220,6 @@
           - "IPv4 Addresses: {{ vm_ipv4_addresses | default(['None detected']) | join(', ') }}"
           - "IPv6 Addresses: {{ vm_ipv6_addresses | default(['None detected']) | join(', ') }}"
           - "Selected IP for SSH: {{ vm_ip }}"
-          - "Primary IP: {{ vm_primary_ip }}"
-          - "IPv4 Addresses: {{ vm_ipv4_addresses | default(['None']) }}"
-          - "IPv6 Addresses: {{ vm_ipv6_addresses | default(['None']) }}"
-          - "Selected IP for SSH: {{ vm_ip }}"
-          - "================================================"
-          - "Network Information for {{ vm_name }}"
-          - "================================================"
-          - "Primary IP: {{ vm_primary_ip | default('Not available') }}"
-          - "IPv4 Addresses: {{ vm_ipv4_addresses | default(['None detected']) | join(', ') }}"
-          - "IPv6 Addresses: {{ vm_ipv6_addresses | default(['None detected']) | join(', ') }}"
-          - "Selected IP for SSH: {{ vm_ip }}"
           - "================================================"
 
     - name: Warning if no IPv4 address detected
@@ -294,8 +236,6 @@
       set_stats:
         data:
           vm_ip: "{{ vm_ip }}"
-          vm_ipv4: "{{ vm_ipv4_addresses | default([]) | join(',') }}"
-          vm_ipv6: "{{ vm_ipv6_addresses | default([]) | join(',') }}"
           vm_ipv4: "{{ vm_ipv4_addresses | default([]) | join(',') }}"
           vm_ipv6: "{{ vm_ipv6_addresses | default([]) | join(',') }}"
           vm_name: "{{ vm_name }}"
@@ -339,18 +279,6 @@
 
     - name: Display SSH availability
       debug:
-      when: vm_ip != 'Not assigned yet'
-
-    - name: Display SSH availability
-      debug:
-        msg: "SSH is now available on {{ vm_ip }}:22"
-      when: vm_ip != 'Not assigned yet'
-      when: 
-        - vm_ip is defined
-        - vm_ip != 'Not assigned yet'
-
-    - name: Display SSH availability
-      debug:
         msg: "✓ SSH is now available on {{ vm_ip }}:22"
       when: 
         - vm_ip is defined
@@ -367,19 +295,11 @@
           - "IPv4 Address(es): {{ vm_ipv4_addresses | default(['None']) | join(', ') }}"
           - "IPv6 Address(es): {{ vm_ipv6_addresses | default(['None']) | join(', ') }}"
           - "Primary IP: {{ vm_ip }}"
-          - "IP Address: {{ vm_ip }}"
-          - "IPv4 Address(es): {{ vm_ipv4_addresses | default(['None']) | join(', ') }}"
-          - "IPv6 Address(es): {{ vm_ipv6_addresses | default(['None']) | join(', ') }}"
-          - "Primary IP: {{ vm_ip }}"
           - "Username: root"
           - "Password: {{ cloud_init_password }}"
           - "SSH Access: ssh root@{{ vm_ip }}"
           - "Network: {{ network_attachment }}"
           - "=========================================="
-      when: 
-        - vm_ip is defined 
-        - vm_ip != 'Not assigned yet'
-      when: vm_ip is defined and vm_ip != 'Not assigned yet'
       when: 
         - vm_ip is defined 
         - vm_ip != 'Not assigned yet'
