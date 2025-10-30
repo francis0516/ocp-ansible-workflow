@@ -1,39 +1,24 @@
 ---
-- name: Register RHEL system to Red Hat Subscription Manager
-  hosts: localhost
-  gather_facts: no
+- name: Register system and add repositories
+  hosts: vms
+  gather_facts: yes
+
   vars:
     rhsm_username: "info@pacetechsystems.com"
     rhsm_password: "Silverado@8787!!!!"
-    ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+    ansible_ssh_common_args: '-o AddressFamily=inet -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
 
   tasks:
-    - name: Display VM IP being used
+    - name: Display VM connection info
       debug:
-        msg: "Connecting to VM at: {{ vm_ip }}"
+        msg: "Connecting to VM at {{ ansible_host }}"
 
-    - name: Add VM to in-memory inventory for this playbook
-      add_host:
-        name: "{{ vm_ip }}"
-        groups: target_vm
-        ansible_user: root
-        ansible_password: "{{ cloud_init_password | default('password') }}"
-        ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
-
-- name: Configure VM with Red Hat Subscription
-  hosts: target_vm
-  gather_facts: no
-  vars:
-    rhsm_username: "info@pacetechsystems.com"
-    rhsm_password: "Silverado@8787!!!!"
-
-  tasks:
     - name: Register the system with Red Hat Subscription Manager
       shell: |
         subscription-manager register --username='{{ rhsm_username }}' --password='{{ rhsm_password }}' --auto-attach
       register: register_result
 
-    - name: Install EPEL repository for RHEL
+    - name: Install EPEL repository for RHEL 9
       shell: |
         dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
       args:
