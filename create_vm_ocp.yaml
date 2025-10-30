@@ -128,7 +128,7 @@
         namespace: "{{ vm_project }}"
         validate_certs: no
       register: dv_info
-      until: 
+      until:
         - dv_info.resources is defined
         - dv_info.resources | length > 0
         - dv_info.resources[0].status.phase is defined
@@ -179,9 +179,9 @@
 
     - name: Wait for IP addresses to stabilize
       debug:
-        msg: "Waiting {{ ip_wait_time }} seconds for both IPv4 and IPv6 addresses to be assigned..."
+        msg: "Waiting {{ ip_wait_time }} seconds for IPv4 address to be assigned..."
 
-    - name: Pause to allow DHCP/SLAAC to complete
+    - name: Pause to allow DHCP to complete
       pause:
         seconds: "{{ ip_wait_time }}"
 
@@ -201,7 +201,12 @@
 
     - name: Extract IPv4 addresses from VM
       set_fact:
-        vm_ipv4_addresses: "{{ vmi_network_info.resources[0].status.interfaces[0].ipAddresses | default([]) | select('match', '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+
+        vm_ipv4_addresses: "{{ vmi_network_info.resources[0].status.interfaces[0].ipAddresses | default([]) | select('match', '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$') | list }}"
+      when: vmi_network_info.resources is defined and vmi_network_info.resources | length > 0
+
+    - name: Set VM IP address (IPv4 only)
+      set_fact:
+        vm_ip: "{{ vm_ipv4_addresses[0] if (vm_ipv4_addresses is defined and vm_ipv4_addresses | length > 0) else 'No IPv4 assigned' }}"
 
     - name: Display detected IPv4 addresses
       debug:
@@ -215,7 +220,7 @@
 
     - name: Warning if no IPv4 address detected
       debug:
-        msg: "⚠️  WARNING: No IPv4 address detected. VM may not be accessible via SSH."
+        msg: "WARNING - No IPv4 address detected. VM may not be accessible via SSH."
       when: vm_ipv4_addresses is not defined or vm_ipv4_addresses | length == 0
 
     - name: Pass VM IP to next workflow job
@@ -258,14 +263,14 @@
         timeout: "{{ ssh_timeout }}"
         state: started
       register: ssh_wait
-      when: 
+      when:
         - vm_ip is defined
         - vm_ip != 'No IPv4 assigned'
 
     - name: Display SSH availability
       debug:
-        msg: "✓ SSH is now available on {{ vm_ip }}:22"
-      when: 
+        msg: "SSH is now available on {{ vm_ip }}:22"
+      when:
         - vm_ip is defined
         - vm_ip != 'No IPv4 assigned'
         - ssh_wait is succeeded
@@ -284,106 +289,6 @@
           - "SSH Access: ssh root@{{ vm_ip }}"
           - "Network: {{ network_attachment }}"
           - "=========================================="
-      when: 
-        - vm_ip is defined 
+      when:
+        - vm_ip is defined
         - vm_ip != 'No IPv4 assigned'
-) | list }}"
-      when: vmi_network_info.resources is defined and vmi_network_info.resources | length > 0
-
-    - name: Set VM IP address (IPv4 only)
-      set_fact:
-        vm_ip: "{{ vm_ipv4_addresses[0] if (vm_ipv4_addresses is defined and vm_ipv4_addresses | length > 0) else 'No IPv4 assigned' }}"
-
-    - name: Display all detected IP addresses
-      debug:
-        msg:
-          - "================================================"
-          - "Network Information for {{ vm_name }}"
-          - "================================================"
-          - "Primary IP: {{ vm_primary_ip | default('Not available') }}"
-          - "IPv4 Addresses: {{ vm_ipv4_addresses | default(['None detected']) | join(', ') }}"
-          - "IPv6 Addresses: {{ vm_ipv6_addresses | default(['None detected']) | join(', ') }}"
-          - "Selected IP for SSH: {{ vm_ip }}"
-          - "================================================"
-
-    - name: Warning if no IPv4 address detected
-      debug:
-        msg: "⚠️  WARNING: No IPv4 address detected. This may affect SSH connectivity."
-      when: vm_ipv4_addresses is not defined or vm_ipv4_addresses | length == 0
-
-    - name: Info if no IPv6 address detected
-      debug:
-        msg: "ℹ️  INFO: No IPv6 address detected (this is normal if IPv6 is not configured on the network)."
-      when: vm_ipv6_addresses is not defined or vm_ipv6_addresses | length == 0
-
-    - name: Pass VM IP to next workflow job
-      set_stats:
-        data:
-          vm_ip: "{{ vm_ip }}"
-          vm_ipv4: "{{ vm_ipv4_addresses | default([]) | join(',') }}"
-          vm_ipv6: "{{ vm_ipv6_addresses | default([]) | join(',') }}"
-          vm_name: "{{ vm_name }}"
-          vm_project: "{{ vm_project }}"
-        per_host: no
-
-    - name: Get VM information
-      kubernetes.core.k8s_info:
-        api_version: kubevirt.io/v1
-        kind: VirtualMachine
-        name: "{{ vm_name }}"
-        namespace: "{{ vm_project }}"
-        validate_certs: no
-      register: vm_info
-
-    - name: Display VM information
-      debug:
-        msg:
-          - "VM Name: {{ vm_info.resources[0].metadata.name }}"
-          - "Namespace: {{ vm_info.resources[0].metadata.namespace }}"
-          - "CPU Cores: {{ vm_info.resources[0].spec.template.spec.domain.cpu.cores }}"
-          - "CPU Sockets: {{ vm_info.resources[0].spec.template.spec.domain.cpu.sockets }}"
-          - "CPU Threads: {{ vm_info.resources[0].spec.template.spec.domain.cpu.threads }}"
-          - "Memory: {{ vm_info.resources[0].spec.template.spec.domain.memory.guest }}"
-          - "Storage Size: {{ storage_size }}"
-          - "Storage Class: {{ storage_class }}"
-          - "VM Status: {{ vm_info.resources[0].status.printableStatus | default('Starting') }}"
-          - "Network: {{ network_attachment }}"
-
-    - name: Wait for SSH to become available
-      wait_for:
-        host: "{{ vm_ip }}"
-        port: 22
-        delay: 10
-        timeout: "{{ ssh_timeout }}"
-        state: started
-      register: ssh_wait
-      when: 
-        - vm_ip is defined
-        - vm_ip != 'Not assigned yet'
-
-    - name: Display SSH availability
-      debug:
-        msg: "✓ SSH is now available on {{ vm_ip }}:22"
-      when: 
-        - vm_ip is defined
-        - vm_ip != 'Not assigned yet'
-        - ssh_wait is succeeded
-
-    - name: Deployment Summary
-      debug:
-        msg:
-          - "======================================"
-          - "VM Deployment Complete Successfully!"
-          - "======================================"
-          - "VM Name: {{ vm_name }}"
-          - "IPv4 Address(es): {{ vm_ipv4_addresses | default(['None']) | join(', ') }}"
-          - "IPv6 Address(es): {{ vm_ipv6_addresses | default(['None']) | join(', ') }}"
-          - "Primary IP: {{ vm_ip }}"
-          - "Username: root"
-          - "Password: {{ cloud_init_password }}"
-          - "SSH Access: ssh root@{{ vm_ip }}"
-          - "Network: {{ network_attachment }}"
-          - "=========================================="
-      when: 
-        - vm_ip is defined 
-        - vm_ip != 'Not assigned yet'
