@@ -174,6 +174,7 @@
         - vmi_network_info.resources[0].status.interfaces is defined
         - vmi_network_info.resources[0].status.interfaces | length > 0
         - vmi_network_info.resources[0].status.interfaces[0].ipAddress is defined
+        - vmi_network_info.resources[0].status.interfaces[0].ipAddresses is defined
       retries: 30
       delay: 10
 
@@ -201,6 +202,7 @@
 
     - name: Extract IPv4 addresses from VM
       set_fact:
+        all_ip_addresses: "{{ vmi_network_info.resources[0].status.interfaces[0].ipAddresses | default([]) }}"
         vm_ipv4_addresses: "{{ vmi_network_info.resources[0].status.interfaces[0].ipAddresses | default([]) | select('match', '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$') | list }}"
       when: vmi_network_info.resources is defined and vmi_network_info.resources | length > 0
 
@@ -214,13 +216,35 @@
           - "================================================"
           - "Network Information for {{ vm_name }}"
           - "================================================"
+          - "All IPs detected: {{ all_ip_addresses | default(['None']) }}"
           - "IPv4 Addresses: {{ vm_ipv4_addresses | default(['None detected']) | join(', ') }}"
           - "Selected IPv4 for SSH: {{ vm_ip }}"
           - "================================================"
 
-    - name: Warning if no IPv4 address detected
-      debug:
-        msg: "WARNING - No IPv4 address detected. VM may not be accessible via SSH."
+    - name: Fail if no IPv4 address is available
+      fail:
+        msg: |
+          ERROR: No IPv4 address was assigned to the VM {{ vm_name }}
+          
+          All detected IPs: {{ all_ip_addresses | default(['None']) }}
+          
+          This typically means:
+          1. Your br-ex-network NetworkAttachmentDefinition is not configured for IPv4
+          2. No DHCP server is available on the physical network
+          3. The network bridge is not properly connected
+          
+          Solutions:
+          1. Configure IPv4 on br-ex-network:
+             oc edit network-attachment-definitions br-ex-network -n {{ vm_project }}
+             Add: "subnets": "10.0.0.0/24" (adjust to your network)
+          
+          2. Restart the VM after network configuration:
+             oc delete vmi {{ vm_name }} -n {{ vm_project }}
+          
+          3. Check network configuration:
+             oc get network-attachment-definitions br-ex-network -n {{ vm_project }} -o yaml
+          
+          VM has been created but is not accessible via IPv4.
       when: vm_ipv4_addresses is not defined or vm_ipv4_addresses | length == 0
 
     - name: Pass VM IP to next workflow job
@@ -255,26 +279,6 @@
           - "VM Status: {{ vm_info.resources[0].status.printableStatus | default('Starting') }}"
           - "Network: {{ network_attachment }}"
 
-    - name: Wait for SSH to become available
-      wait_for:
-        host: "{{ vm_ip }}"
-        port: 22
-        delay: 10
-        timeout: "{{ ssh_timeout }}"
-        state: started
-      register: ssh_wait
-      when:
-        - vm_ip is defined
-        - vm_ip != 'No IPv4 assigned'
-
-    - name: Display SSH availability
-      debug:
-        msg: "SSH is now available on {{ vm_ip }}:22"
-      when:
-        - vm_ip is defined
-        - vm_ip != 'No IPv4 assigned'
-        - ssh_wait is succeeded
-
     - name: Deployment Summary
       debug:
         msg:
@@ -286,9 +290,11 @@
           - "All IPv4 Addresses: {{ vm_ipv4_addresses | default(['None']) | join(', ') }}"
           - "Username: root"
           - "Password: {{ cloud_init_password }}"
-          - "SSH Access: ssh root@{{ vm_ip }}"
           - "Network: {{ network_attachment }}"
+          - "======================================"
+          - "VM is ready for SSH access"
+          - "Variables exported for downstream jobs:"
+          - "  - vm_ip: {{ vm_ip }}"
+          - "  - vm_name: {{ vm_name }}"
+          - "  - vm_project: {{ vm_project }}"
           - "=========================================="
-      when:
-        - vm_ip is defined
-        - vm_ip != 'No IPv4 assigned'
