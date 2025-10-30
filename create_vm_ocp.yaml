@@ -30,135 +30,69 @@
           - "Network: {{ network_attachment }}"
 
     - name: Provision Virtual Machine in OpenShift
-      kubernetes.core.k8s:
+      community.kubevirt.kubevirt_vm:
+        namespace: "{{ vm_project }}"
+        name: "{{ vm_name }}"
         state: present
-        validate_certs: no
-        definition:
-          apiVersion: kubevirt.io/v1
-          kind: VirtualMachine
+        running: true
+        template:
           metadata:
-            name: "{{ vm_name }}"
-            namespace: "{{ vm_project }}"
             labels:
               app: "{{ vm_name }}"
           spec:
-            running: true
-            dataVolumeTemplates:
-              - metadata:
-                  name: "{{ vm_name }}"
-                  annotations:
-                    cdi.kubevirt.io/storage.bind.immediate.requested: "true"
-                spec:
-                  source:
-                    pvc:
-                      name: centos9-golden-image
-                      namespace: vm-migration-test
-                  storage:
-                    storageClassName: "{{ storage_class }}"
-                    accessModes:
-                      - ReadWriteMany
-                    volumeMode: Filesystem
-                    resources:
-                      requests:
-                        storage: "{{ storage_size }}"
-            template:
-              metadata:
-                labels:
-                  kubevirt.io/domain: "{{ vm_name }}"
-              spec:
-                domain:
-                  cpu:
-                    cores: "{{ cpu_cores }}"
-                    sockets: "{{ cpu_sockets }}"
-                    threads: "{{ cpu_threads }}"
-                  memory:
-                    guest: "{{ memory_size }}"
-                  devices:
-                    disks:
-                      - name: rootdisk
-                        disk:
-                          bus: virtio
-                      - name: cloudinitdisk
-                        disk:
-                          bus: virtio
-                    interfaces:
-                      - name: default
-                        bridge: {}
-                networks:
-                  - name: default
-                    multus:
-                      networkName: "{{ network_attachment }}"
-                volumes:
+            domain:
+              cpu:
+                cores: "{{ cpu_cores }}"
+                sockets: "{{ cpu_sockets }}"
+                threads: "{{ cpu_threads }}"
+              memory:
+                guest: "{{ memory_size }}"
+              devices:
+                disks:
                   - name: rootdisk
-                    dataVolume:
-                      name: "{{ vm_name }}"
+                    disk:
+                      bus: virtio
                   - name: cloudinitdisk
-                    cloudInitNoCloud:
-                      networkData: |-
-                        version: 2
-                        ethernets:
-                          eth0:
-                            dhcp4: true
-                            dhcp6: true
-                            dhcp4-overrides:
-                              use-dns: true
-                      userData: |-
-                        #cloud-config
-                        user: root
-                        password: {{ cloud_init_password }}
-                        chpasswd: { expire: False }
-                        ssh_pwauth: True
-                        runcmd:
-                          - sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-                          - sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-                          - systemctl restart sshd
-                          - systemctl enable sshd
+                    disk:
+                      bus: virtio
+                interfaces:
+                  - name: default
+                    bridge: {}
+            networks:
+              - name: default
+                multus:
+                  networkName: "{{ network_attachment }}"
+            volumes:
+              - name: rootdisk
+                dataVolume:
+                  name: "{{ vm_name }}"
+              - name: cloudinitdisk
+                cloudInitNoCloud:
+                  networkData: |-
+                    version: 2
+                    ethernets:
+                      eth0:
+                        dhcp4: true
+                        dhcp6: false   # Disable IPv6
+                        dhcp4-overrides:
+                          use-dns: true
+                  userData: |-
+                    #cloud-config
+                    user: root
+                    password: {{ cloud_init_password }}
+                    chpasswd: { expire: False }
+                    ssh_pwauth: True
+                    runcmd:
+                      - sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+                      - sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+                      - systemctl restart sshd
+                      - systemctl enable sshd
       register: vm_creation
 
     - name: Display VM creation result
       debug:
         msg: "VM {{ vm_name }} provisioned successfully in namespace {{ vm_project }}"
       when: vm_creation.changed
-
-    - name: Wait for DataVolume to be created and ready
-      kubernetes.core.k8s_info:
-        api_version: cdi.kubevirt.io/v1beta1
-        kind: DataVolume
-        name: "{{ vm_name }}"
-        namespace: "{{ vm_project }}"
-        validate_certs: no
-      register: dv_info
-      until: 
-        - dv_info.resources is defined
-        - dv_info.resources | length > 0
-        - dv_info.resources[0].status.phase is defined
-        - dv_info.resources[0].status.phase == "Succeeded"
-      retries: 30
-      delay: 10
-
-    - name: Display DataVolume status
-      debug:
-        msg: "DataVolume for {{ vm_name }} is ready (Phase: {{ dv_info.resources[0].status.phase }})"
-
-    - name: Wait for VM to be running
-      kubernetes.core.k8s_info:
-        api_version: kubevirt.io/v1
-        kind: VirtualMachineInstance
-        name: "{{ vm_name }}"
-        namespace: "{{ vm_project }}"
-        validate_certs: no
-      register: vmi_info
-      until:
-        - vmi_info.resources is defined
-        - vmi_info.resources | length > 0
-        - vmi_info.resources[0].status.phase is defined
-        - vmi_info.resources[0].status.phase == "Running"
-      retries: 30
-      delay: 10
-
-    - name: Display VM running status
-      debug:
-        msg: "VM {{ vm_name }} is now running"
 
     - name: Wait for VM network interfaces to be ready
       kubernetes.core.k8s_info:
@@ -177,93 +111,10 @@
       retries: 30
       delay: 10
 
-    - name: Wait for IP addresses to stabilize
-      debug:
-        msg: "Waiting {{ ip_wait_time }} seconds for both IPv4 and IPv6 addresses to be assigned..."
-
-    - name: Pause to allow DHCP/SLAAC to complete
-      pause:
-        seconds: "{{ ip_wait_time }}"
-
-    - name: Refresh VM network information after waiting
-      kubernetes.core.k8s_info:
-        api_version: kubevirt.io/v1
-        kind: VirtualMachineInstance
-        name: "{{ vm_name }}"
-        namespace: "{{ vm_project }}"
-        validate_certs: no
-      register: vmi_network_info
-
-    - name: Debug - Display raw interface information
-      debug:
-        msg: "All interfaces: {{ vmi_network_info.resources[0].status.interfaces }}"
-      when: vmi_network_info.resources is defined and vmi_network_info.resources | length > 0
-
-    - name: Extract all available IP addresses from VM
+    - name: Extract IPv4 address only
       set_fact:
-        vm_ipv4_addresses: "{{ vmi_network_info.resources[0].status.interfaces[0].ipAddresses | default([]) | select('match', '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$') | list }}"
-        vm_ipv6_addresses: "{{ vmi_network_info.resources[0].status.interfaces[0].ipAddresses | default([]) | select('match', '^[0-9a-fA-F:]+$') | list }}"
-        vm_primary_ip: "{{ vmi_network_info.resources[0].status.interfaces[0].ipAddress | default('Not assigned yet') }}"
-      when: vmi_network_info.resources is defined and vmi_network_info.resources | length > 0
-
-    - name: Set VM IP address (prefer IPv4, fallback to IPv6)
-      set_fact:
-        vm_ip: "{{ vm_ipv4_addresses[0] if (vm_ipv4_addresses is defined and vm_ipv4_addresses | length > 0) else (vm_ipv6_addresses[0] if (vm_ipv6_addresses is defined and vm_ipv6_addresses | length > 0) else vm_primary_ip) }}"
-
-    - name: Display all detected IP addresses
-      debug:
-        msg:
-          - "================================================"
-          - "Network Information for {{ vm_name }}"
-          - "================================================"
-          - "Primary IP: {{ vm_primary_ip | default('Not available') }}"
-          - "IPv4 Addresses: {{ vm_ipv4_addresses | default(['None detected']) | join(', ') }}"
-          - "IPv6 Addresses: {{ vm_ipv6_addresses | default(['None detected']) | join(', ') }}"
-          - "Selected IP for SSH: {{ vm_ip }}"
-          - "================================================"
-
-    - name: Warning if no IPv4 address detected
-      debug:
-        msg: "⚠️  WARNING: No IPv4 address detected. This may affect SSH connectivity."
-      when: vm_ipv4_addresses is not defined or vm_ipv4_addresses | length == 0
-
-    - name: Info if no IPv6 address detected
-      debug:
-        msg: "ℹ️  INFO: No IPv6 address detected (this is normal if IPv6 is not configured on the network)."
-      when: vm_ipv6_addresses is not defined or vm_ipv6_addresses | length == 0
-
-    - name: Pass VM IP to next workflow job
-      set_stats:
-        data:
-          vm_ip: "{{ vm_ip }}"
-          vm_ipv4: "{{ vm_ipv4_addresses | default([]) | join(',') }}"
-          vm_ipv6: "{{ vm_ipv6_addresses | default([]) | join(',') }}"
-          vm_name: "{{ vm_name }}"
-          vm_project: "{{ vm_project }}"
-        per_host: no
-
-    - name: Get VM information
-      kubernetes.core.k8s_info:
-        api_version: kubevirt.io/v1
-        kind: VirtualMachine
-        name: "{{ vm_name }}"
-        namespace: "{{ vm_project }}"
-        validate_certs: no
-      register: vm_info
-
-    - name: Display VM information
-      debug:
-        msg:
-          - "VM Name: {{ vm_info.resources[0].metadata.name }}"
-          - "Namespace: {{ vm_info.resources[0].metadata.namespace }}"
-          - "CPU Cores: {{ vm_info.resources[0].spec.template.spec.domain.cpu.cores }}"
-          - "CPU Sockets: {{ vm_info.resources[0].spec.template.spec.domain.cpu.sockets }}"
-          - "CPU Threads: {{ vm_info.resources[0].spec.template.spec.domain.cpu.threads }}"
-          - "Memory: {{ vm_info.resources[0].spec.template.spec.domain.memory.guest }}"
-          - "Storage Size: {{ storage_size }}"
-          - "Storage Class: {{ storage_class }}"
-          - "VM Status: {{ vm_info.resources[0].status.printableStatus | default('Starting') }}"
-          - "Network: {{ network_attachment }}"
+        vm_ipv4_addresses: "{{ vmi_network_info.resources[0].status.interfaces | map(attribute='ipAddress') | select('match', '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$') | list }}"
+        vm_ip: "{{ vm_ipv4_addresses[0] | default('Not assigned yet') }}"
 
     - name: Wait for SSH to become available
       wait_for:
@@ -272,18 +123,24 @@
         delay: 10
         timeout: "{{ ssh_timeout }}"
         state: started
-      register: ssh_wait
-      when: 
-        - vm_ip is defined
-        - vm_ip != 'Not assigned yet'
+      vars:
+        ansible_ssh_common_args: '-o AddressFamily=inet'
+      when: vm_ip != 'Not assigned yet'
 
     - name: Display SSH availability
       debug:
         msg: "✓ SSH is now available on {{ vm_ip }}:22"
-      when: 
-        - vm_ip is defined
+      when:
         - vm_ip != 'Not assigned yet'
-        - ssh_wait is succeeded
+
+    - name: Pass VM IP to next workflow job
+      set_stats:
+        data:
+          vm_ip: "{{ vm_ip }}"
+          vm_ipv4: "{{ vm_ipv4_addresses | default([]) | join(',') }}"
+          vm_name: "{{ vm_name }}"
+          vm_project: "{{ vm_project }}"
+        per_host: no
 
     - name: Deployment Summary
       debug:
@@ -293,13 +150,9 @@
           - "======================================"
           - "VM Name: {{ vm_name }}"
           - "IPv4 Address(es): {{ vm_ipv4_addresses | default(['None']) | join(', ') }}"
-          - "IPv6 Address(es): {{ vm_ipv6_addresses | default(['None']) | join(', ') }}"
-          - "Primary IP: {{ vm_ip }}"
+          - "SSH Access: ssh root@{{ vm_ip }}"
           - "Username: root"
           - "Password: {{ cloud_init_password }}"
-          - "SSH Access: ssh root@{{ vm_ip }}"
           - "Network: {{ network_attachment }}"
           - "=========================================="
-      when: 
-        - vm_ip is defined 
-        - vm_ip != 'Not assigned yet'
+      when: vm_ip != 'Not assigned yet'
