@@ -1,5 +1,5 @@
 ---
-- name: Create a VM on OpenShift Virtualization
+- name: Create a VM on OpenShift Virtualization and extract IPv4
   hosts: localhost
   connection: local
   gather_facts: false
@@ -55,8 +55,7 @@
                       namespace: vm-migration-test
                   storage:
                     storageClassName: "{{ storage_class }}"
-                    accessModes:
-                      - ReadWriteMany
+                    accessModes: [ "ReadWriteMany" ]
                     volumeMode: Filesystem
                     resources:
                       requests:
@@ -76,11 +75,9 @@
                   devices:
                     disks:
                       - name: rootdisk
-                        disk:
-                          bus: virtio
+                        disk: { bus: virtio }
                       - name: cloudinitdisk
-                        disk:
-                          bus: virtio
+                        disk: { bus: virtio }
                     interfaces:
                       - name: default
                         bridge: {}
@@ -94,15 +91,13 @@
                       name: "{{ vm_name }}"
                   - name: cloudinitdisk
                     cloudInitNoCloud:
-                      networkData: |-
+                      networkData: |
                         version: 2
                         ethernets:
                           eth0:
                             dhcp4: true
-                            dhcp6: true
-                            dhcp4-overrides:
-                              use-dns: true
-                      userData: |-
+                            dhcp6: false
+                      userData: |
                         #cloud-config
                         user: root
                         password: {{ cloud_init_password }}
@@ -115,12 +110,7 @@
                           - systemctl enable sshd
       register: vm_creation
 
-    - name: Display VM creation result
-      debug:
-        msg: "VM {{ vm_name }} provisioned successfully in namespace {{ vm_project }}"
-      when: vm_creation.changed
-
-    - name: Wait for DataVolume to be created and ready
+    - name: Wait for DataVolume to be ready
       kubernetes.core.k8s_info:
         api_version: cdi.kubevirt.io/v1beta1
         kind: DataVolume
@@ -131,14 +121,9 @@
       until:
         - dv_info.resources is defined
         - dv_info.resources | length > 0
-        - dv_info.resources[0].status.phase is defined
         - dv_info.resources[0].status.phase == "Succeeded"
       retries: 30
       delay: 10
-
-    - name: Display DataVolume status
-      debug:
-        msg: "DataVolume for {{ vm_name }} is ready (Phase: {{ dv_info.resources[0].status.phase }})"
 
     - name: Wait for VM to be running
       kubernetes.core.k8s_info:
@@ -151,42 +136,15 @@
       until:
         - vmi_info.resources is defined
         - vmi_info.resources | length > 0
-        - vmi_info.resources[0].status.phase is defined
         - vmi_info.resources[0].status.phase == "Running"
       retries: 30
       delay: 10
 
-    - name: Display VM running status
-      debug:
-        msg: "VM {{ vm_name }} is now running"
-
-    - name: Wait for VM network interfaces to be ready
-      kubernetes.core.k8s_info:
-        api_version: kubevirt.io/v1
-        kind: VirtualMachineInstance
-        name: "{{ vm_name }}"
-        namespace: "{{ vm_project }}"
-        validate_certs: no
-      register: vmi_network_info
-      until:
-        - vmi_network_info.resources is defined
-        - vmi_network_info.resources | length > 0
-        - vmi_network_info.resources[0].status.interfaces is defined
-        - vmi_network_info.resources[0].status.interfaces | length > 0
-        - vmi_network_info.resources[0].status.interfaces[0].ipAddress is defined
-        - vmi_network_info.resources[0].status.interfaces[0].ipAddresses is defined
-      retries: 30
-      delay: 10
-
-    - name: Wait for IP addresses to stabilize
-      debug:
-        msg: "Waiting {{ ip_wait_time }} seconds for IPv4 address to be assigned..."
-
-    - name: Pause to allow DHCP to complete
+    - name: Pause for IP assignment
       pause:
         seconds: "{{ ip_wait_time }}"
 
-    - name: Refresh VM network information after waiting
+    - name: Get latest VM network info
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
         kind: VirtualMachineInstance
@@ -195,106 +153,49 @@
         validate_certs: no
       register: vmi_network_info
 
-    - name: Debug - Display raw interface information
+    - name: Debug - Show all interfaces
       debug:
-        msg: "All interfaces: {{ vmi_network_info.resources[0].status.interfaces }}"
-      when: vmi_network_info.resources is defined and vmi_network_info.resources | length > 0
+        msg: "{{ vmi_network_info.resources[0].status.interfaces | default([]) }}"
 
-    - name: Extract IPv4 addresses from VM
+    - name: Extract IPv4 address
       set_fact:
         all_ip_addresses: "{{ vmi_network_info.resources[0].status.interfaces[0].ipAddresses | default([]) }}"
-        vm_ipv4_addresses: "{{ vmi_network_info.resources[0].status.interfaces[0].ipAddresses | default([]) | select('match', '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$') | list }}"
-      when: vmi_network_info.resources is defined and vmi_network_info.resources | length > 0
+        vm_ipv4_addresses: "{{ all_ip_addresses | select('match', '^(\\d{1,3}\\.){3}\\d{1,3}$') | list }}"
+        vm_ip: "{{ (vm_ipv4_addresses | first) | default('No IPv4 assigned') }}"
 
-    - name: Set VM IP address (IPv4 only)
-      set_fact:
-        vm_ip: "{{ vm_ipv4_addresses[0] if (vm_ipv4_addresses is defined and vm_ipv4_addresses | length > 0) else 'No IPv4 assigned' }}"
-
-    - name: Display detected IPv4 addresses
+    - name: Display IPv4 extraction result
       debug:
         msg:
-          - "================================================"
-          - "Network Information for {{ vm_name }}"
-          - "================================================"
-          - "All IPs detected: {{ all_ip_addresses | default(['None']) }}"
-          - "IPv4 Addresses: {{ vm_ipv4_addresses | default(['None detected']) | join(', ') }}"
-          - "Selected IPv4 for SSH: {{ vm_ip }}"
-          - "================================================"
+          - "======================================"
+          - "VM Name: {{ vm_name }}"
+          - "All IPs Detected: {{ all_ip_addresses | join(', ') | default('None') }}"
+          - "IPv4 Addresses: {{ vm_ipv4_addresses | join(', ') | default('None detected') }}"
+          - "Selected IPv4: {{ vm_ip }}"
+          - "======================================"
 
-    - name: Fail if no IPv4 address is available
+    - name: Fail if IPv4 is missing
       fail:
         msg: |
-          ERROR: No IPv4 address was assigned to the VM {{ vm_name }}
-          
-          All detected IPs: {{ all_ip_addresses | default(['None']) }}
-          
-          This typically means:
-          1. Your br-ex-network NetworkAttachmentDefinition is not configured for IPv4
-          2. No DHCP server is available on the physical network
-          3. The network bridge is not properly connected
-          
-          Solutions:
-          1. Configure IPv4 on br-ex-network:
-             oc edit network-attachment-definitions br-ex-network -n {{ vm_project }}
-             Add: "subnets": "10.0.0.0/24" (adjust to your network)
-          
-          2. Restart the VM after network configuration:
-             oc delete vmi {{ vm_name }} -n {{ vm_project }}
-          
-          3. Check network configuration:
-             oc get network-attachment-definitions br-ex-network -n {{ vm_project }} -o yaml
-          
-          VM has been created but is not accessible via IPv4.
-      when: vm_ipv4_addresses is not defined or vm_ipv4_addresses | length == 0
+          No IPv4 address detected for {{ vm_name }}.
+          Verify that DHCP is enabled and the Multus network ({{ network_attachment }}) provides IPv4.
+      when: vm_ipv4_addresses | length == 0
 
-    - name: Pass VM IP to next workflow job
+    - name: Save IPv4 for downstream jobs
       set_stats:
         data:
           vm_ip: "{{ vm_ip }}"
-          vm_ipv4: "{{ vm_ipv4_addresses | default([]) | join(',') }}"
           vm_name: "{{ vm_name }}"
           vm_project: "{{ vm_project }}"
         per_host: no
-
-    - name: Get VM information
-      kubernetes.core.k8s_info:
-        api_version: kubevirt.io/v1
-        kind: VirtualMachine
-        name: "{{ vm_name }}"
-        namespace: "{{ vm_project }}"
-        validate_certs: no
-      register: vm_info
-
-    - name: Display VM information
-      debug:
-        msg:
-          - "VM Name: {{ vm_info.resources[0].metadata.name }}"
-          - "Namespace: {{ vm_info.resources[0].metadata.namespace }}"
-          - "CPU Cores: {{ vm_info.resources[0].spec.template.spec.domain.cpu.cores }}"
-          - "CPU Sockets: {{ vm_info.resources[0].spec.template.spec.domain.cpu.sockets }}"
-          - "CPU Threads: {{ vm_info.resources[0].spec.template.spec.domain.cpu.threads }}"
-          - "Memory: {{ vm_info.resources[0].spec.template.spec.domain.memory.guest }}"
-          - "Storage Size: {{ storage_size }}"
-          - "Storage Class: {{ storage_class }}"
-          - "VM Status: {{ vm_info.resources[0].status.printableStatus | default('Starting') }}"
-          - "Network: {{ network_attachment }}"
 
     - name: Deployment Summary
       debug:
         msg:
           - "======================================"
           - "VM Deployment Complete Successfully!"
-          - "======================================"
           - "VM Name: {{ vm_name }}"
           - "IPv4 Address: {{ vm_ip }}"
-          - "All IPv4 Addresses: {{ vm_ipv4_addresses | default(['None']) | join(', ') }}"
           - "Username: root"
           - "Password: {{ cloud_init_password }}"
           - "Network: {{ network_attachment }}"
           - "======================================"
-          - "VM is ready for SSH access"
-          - "Variables exported for downstream jobs:"
-          - "  - vm_ip: {{ vm_ip }}"
-          - "  - vm_name: {{ vm_name }}"
-          - "  - vm_project: {{ vm_project }}"
-          - "=========================================="
