@@ -142,43 +142,68 @@
       retries: 30
       delay: 10
 
-    - name: Fetch VM network info repeatedly until IPv4 is assigned
-      block:
-        - name: Get latest VM network info
-          kubernetes.core.k8s_info:
-            api_version: kubevirt.io/v1
-            kind: VirtualMachineInstance
-            name: "{{ vm_name }}"
-            namespace: "{{ vm_project }}"
-            validate_certs: no
-          register: vmi_network_info
-
-        - name: Extract IPv4 from all interfaces
-          set_fact:
-            interfaces_list: "{{ vmi_network_info.resources[0].status.interfaces | default([]) }}"
-            all_ip_addresses: >-
-              {{
-                (
-                  interfaces_list
-                  | map(attribute='ipAddresses')
-                  | select('defined')
-                  | map('flatten')
-                  | list
-                )
-                + (
-                  interfaces_list
-                  | selectattr('ipAddress', 'defined')
-                  | map(attribute='ipAddress')
-                  | list
-                )
-              }}
-            ipv4_candidates: "{{ all_ip_addresses | select('match', '^(\\d{1,3}\\.){3}\\d{1,3}$') | list }}"
-            vm_ip: "{{ (ipv4_candidates | first) | default('No IPv4 assigned') }}"
-          retries: "{{ max_ip_retries }}"
-          delay: "{{ ip_poll_interval }}"
-          until: vm_ip != 'No IPv4 assigned'
+    - name: Wait for VM IPv4 to be assigned
+      vars:
+        vm_ip: "No IPv4 assigned"
+      set_fact:
+        vm_ip: >-
+          {{
+            (
+              (
+                vmi_network_info.resources[0].status.interfaces | default([])
+              )
+              | map(attribute='ipAddresses')
+              | select('defined')
+              | flatten
+              | select('match', '^(\\d{1,3}\\.){3}\\d{1,3}$')
+              | list
+              | first
+            ) | default('No IPv4 assigned')
+          }}
+      register: vm_ip_fact
+      until: vm_ip != 'No IPv4 assigned'
+      retries: "{{ max_ip_retries }}"
+      delay: "{{ ip_poll_interval }}"
+      vars:
+        vmi_network_info: "{{ lookup('community.kubernetes.k8s_info',
+          api_version='kubevirt.io/v1',
+          kind='VirtualMachineInstance',
+          namespace=vm_project,
+          name=vm_name,
+          validate_certs=False) }}"
 
     - name: Fail if IPv4 is missing after retries
       fail:
         msg: "No IPv4 address detected for {{ vm_name }} after waiting. Check DHCP/Multus."
-      when: vm_ip == 'No IPv4 ass_
+      when: vm_ip == 'No IPv4 assigned'
+
+    - name: Display IPv4 extraction result
+      debug:
+        msg:
+          - "======================================"
+          - "VM Name: {{ vm_name }}"
+          - "IPv4 Address: {{ vm_ip }}"
+          - "Username: root"
+          - "Password: {{ cloud_init_password }}"
+          - "Network: {{ network_attachment }}"
+          - "======================================"
+
+    - name: Save IPv4 for downstream jobs
+      set_stats:
+        data:
+          vm_ip: "{{ vm_ip }}"
+          vm_name: "{{ vm_name }}"
+          vm_project: "{{ vm_project }}"
+        per_host: no
+
+    - name: Deployment Summary
+      debug:
+        msg:
+          - "======================================"
+          - "VM Deployment Complete Successfully!"
+          - "VM Name: {{ vm_name }}"
+          - "IPv4 Address: {{ vm_ip }}"
+          - "Username: root"
+          - "Password: {{ cloud_init_password }}"
+          - "Network: {{ network_attachment }}"
+          - "======================================"
