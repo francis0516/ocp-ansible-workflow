@@ -1,7 +1,9 @@
-- name: Wait for VM to report IPv4
+---
+- name: Wait for VM to report IPv4 and SSH readiness
   hosts: localhost
   connection: local
   gather_facts: false
+
   vars:
     ssh_timeout: 300
     vm_password: "{{ cloud_init_password | default('password') }}"
@@ -10,37 +12,67 @@
     ansible_ssh_common_args: '-o AddressFamily=inet -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
 
   tasks:
-    - name: Poll VM until it has an IPv4 address
-      kubernetes.core.k8s_info:
-        api_version: kubevirt.io/v1
-        kind: VirtualMachineInstance
-        namespace: "{{ vm_project }}"
-        name: "{{ vm_name }}"
-        validate_certs: no
-      register: vmi_info
-      until:
-        - vmi_info.resources is defined
-        - vmi_info.resources | length > 0
-        - vmi_info.resources[0].status.interfaces is defined
-        - vmi_info.resources[0].status.interfaces[0].ipAddress is defined
-      retries: "{{ (max_ip_wait // ip_poll_interval) | int }}"
-      delay: "{{ ip_poll_interval }}"
+    - name: Wait for VM IPv4 and SSH readiness
+      block:
+        - name: Poll VM until IPv4 address and SSH port are ready
+          vars:
+            attempt: 0
+          until: vm_ip is defined and vm_ip != '' and ssh_ready is defined and ssh_ready
+          retries: "{{ (max_ip_wait // ip_poll_interval) | int }}"
+          delay: "{{ ip_poll_interval }}"
+          block:
+            - name: Get VM interface info
+              kubernetes.core.k8s_info:
+                api_version: kubevirt.io/v1
+                kind: VirtualMachineInstance
+                namespace: "{{ vm_project }}"
+                name: "{{ vm_name }}"
+                validate_certs: no
+              register: vmi_info
+              ignore_errors: true
 
-    - name: Extract IPv4
-      set_fact:
-        vm_ip: "{{ vmi_info.resources[0].status.interfaces[0].ipAddress | regex_search('^([0-9]{1,3}\\.){3}[0-9]{1,3}', '\\0') }}"
+            - name: Extract IPv4 if available
+              set_fact:
+                vm_ip: "{{ vmi_info.resources[0].status.interfaces[0].ipAddress
+                           | regex_search('^([0-9]{1,3}\\.){3}[0-9]{1,3}', '\\0') }}"
+              when:
+                - vmi_info.resources is defined
+                - vmi_info.resources | length > 0
+                - vmi_info.resources[0].status.interfaces is defined
+                - vmi_info.resources[0].status.interfaces[0].ipAddress is defined
+              ignore_errors: true
 
-    - name: Wait for SSH to become available
-      wait_for:
-        host: "{{ vm_ip }}"
-        port: 22
-        delay: 10
-        timeout: "{{ ssh_timeout }}"
-        state: started
-      vars:
-        ansible_ssh_common_args: "{{ ansible_ssh_common_args }}"
+            - name: Attempt SSH connection check (only if IP available)
+              wait_for:
+                host: "{{ vm_ip }}"
+                port: 22
+                timeout: "{{ ip_poll_interval }}"
+                state: started
+              register: ssh_result
+              when: vm_ip is defined and vm_ip != ''
+              ignore_errors: true
 
-    - name: Add VM to in-memory inventory
+            - name: Set SSH readiness flag
+              set_fact:
+                ssh_ready: "{{ (ssh_result is defined and ssh_result.elapsed is defined) }}"
+              when: vm_ip is defined and vm_ip != ''
+      rescue:
+        - name: Fail if VM did not report IPv4 or SSH within timeout
+          fail:
+            msg: |
+              ❌ VM {{ vm_name }} did not report an IPv4 or SSH port within {{ max_ip_wait }} seconds.
+              Check if:
+                - The network attachment {{ network_attachment | default('br-ex-network') }} provides IPv4
+                - Cloud-init network config is set for DHCP
+                - SSH service is running inside the VM
+
+    - name: Confirm VM IPv4 and SSH status
+      debug:
+        msg:
+          - "✅ VM IPv4 detected: {{ vm_ip }}"
+          - "✅ SSH port 22 is reachable on {{ vm_ip }}"
+
+    - name: Add VM to dynamic in-memory inventory
       add_host:
         name: "target_vm_host"
         ansible_host: "{{ vm_ip }}"
@@ -49,6 +81,6 @@
         ansible_ssh_common_args: "{{ ansible_ssh_common_args }}"
         groups: vms
 
-    - name: Display inventory addition
+    - name: Display added VM info
       debug:
-        msg: "VM {{ vm_name }} ({{ vm_ip }}) added to group 'vms'"
+        msg: "VM {{ vm_name }} ({{ vm_ip }}) added to dynamic group 'vms' for next tasks"
