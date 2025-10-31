@@ -157,11 +157,23 @@
       debug:
         msg: "{{ vmi_network_info.resources[0].status.interfaces | default([]) }}"
 
-    - name: Extract IPv4 address
+    - name: Extract IPv4 address safely
       set_fact:
-        all_ip_addresses: "{{ vmi_network_info.resources[0].status.interfaces[0].ipAddresses | default([]) }}"
+        all_ip_addresses: >-
+          {{
+            (
+              vmi_network_info.resources[0].status.interfaces[0].ipAddresses
+              if (vmi_network_info.resources[0].status.interfaces[0].ipAddresses is defined)
+              else [ vmi_network_info.resources[0].status.interfaces[0].ipAddress ]
+            ) | default([])
+          }}
         vm_ipv4_addresses: "{{ all_ip_addresses | select('match', '^(\\d{1,3}\\.){3}\\d{1,3}$') | list }}"
         vm_ip: "{{ (vm_ipv4_addresses | first) | default('No IPv4 assigned') }}"
+      when:
+        - vmi_network_info.resources is defined
+        - vmi_network_info.resources | length > 0
+        - vmi_network_info.resources[0].status.interfaces is defined
+        - vmi_network_info.resources[0].status.interfaces | length > 0
 
     - name: Display IPv4 extraction result
       debug:
