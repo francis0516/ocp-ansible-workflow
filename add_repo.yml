@@ -2,24 +2,88 @@
 - name: Register system and add repositories
   hosts: vms
   gather_facts: yes
+  become: true
 
   vars:
     rhsm_username: "info@pacetechsystems.com"
     rhsm_password: "Silverado@8787!!!!"
     ansible_ssh_common_args: '-o AddressFamily=inet -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+    rhel_version: 9
+    repos_to_enable:
+      - rhel-9-for-x86_64-baseos-rpms
+      - rhel-9-for-x86_64-appstream-rpms
+      - codeready-builder-for-rhel-9-x86_64-rpms
 
   tasks:
     - name: Display VM connection info
       debug:
         msg: "Connecting to VM at {{ ansible_host }}"
 
+    - name: Ensure subscription-manager is installed
+      package:
+        name: subscription-manager
+        state: present
+
+    - name: Unregister if already registered (clean state)
+      shell: |
+        subscription-manager remove --all || true
+        subscription-manager unregister || true
+        subscription-manager clean || true
+      ignore_errors: true
+
     - name: Register the system with Red Hat Subscription Manager
       shell: |
-        subscription-manager register --username='{{ rhsm_username }}' --password='{{ rhsm_password }}' --auto-attach
+        subscription-manager register \
+          --username='{{ rhsm_username }}' \
+          --password='{{ rhsm_password }}' \
+          --auto-attach
       register: register_result
+      changed_when: "'The system has been registered' in register_result.stdout or 'Auto-attach' in register_result.stdout"
+      failed_when:
+        - register_result.rc != 0
+        - "'already registered' not in register_result.stderr | lower"
+      no_log: true
 
-    - name: Install EPEL repository for RHEL 9
+    - name: Display registration result
+      debug:
+        msg: "{{ register_result.stdout_lines | default(['Registration completed or already registered']) }}"
+
+    - name: Disable all repos (clean start)
+      shell: subscription-manager repos --disable="*"
+      ignore_errors: true
+
+    - name: Enable required RHEL repositories
       shell: |
-        dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
+        subscription-manager repos --enable={{ item }}
+      with_items: "{{ repos_to_enable }}"
+      register: enable_repo_result
+      changed_when: "'enabled' in enable_repo_result.stdout"
+      ignore_errors: true
+
+    - name: Display enabled repositories
+      shell: subscription-manager repos --list-enabled
+      register: enabled_repos
+
+    - name: Show enabled repository summary
+      debug:
+        msg: "{{ enabled_repos.stdout_lines | select('match', '^Repo ID:') | list }}"
+
+    - name: Install EPEL repository (for RHEL {{ rhel_version }})
+      shell: |
+        dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-{{ rhel_version }}.noarch.rpm
       args:
         creates: /etc/yum.repos.d/epel.repo
+
+    - name: Clean and refresh repo metadata
+      shell: |
+        dnf clean all
+        dnf makecache
+
+    - name: Verify repository access
+      shell: dnf repolist enabled
+      register: repolist
+      changed_when: false
+
+    - name: Display final enabled repositories
+      debug:
+        msg: "{{ repolist.stdout_lines }}"
