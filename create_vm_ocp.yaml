@@ -136,9 +136,10 @@
       retries: 60
       delay: 10
 
-    - name: Poll VM for IPv4 address via guest agent
+    - name: Poll VM for IPv4 address (guest agent or SSH fallback)
       block:
-        - name: Poll VMI status
+
+        - name: Poll VMI status for IPv4 (guest agent)
           kubernetes.core.k8s_info:
             api_version: kubevirt.io/v1
             kind: VirtualMachineInstance
@@ -175,10 +176,9 @@
               }}
             vm_ip: "{{ vm_ipv4_addresses[0] if vm_ipv4_addresses | length > 0 else 'No IPv4 assigned' }}"
 
-        - name: Fallback: Extract IPv4 via SSH if guest agent failed
-          when: vm_ip == 'No IPv4 assigned'
+        - name: SSH fallback if guest agent failed
           block:
-            - name: Wait for SSH port 22 on first interface IP
+            - name: Wait for SSH to be available
               wait_for:
                 host: "{{ (vmi_network_info.resources[0].status.interfaces[0].ipAddresses[0] | default('127.0.0.1')) }}"
                 port: 22
@@ -186,11 +186,11 @@
                 delay: 10
               ignore_errors: true
 
-            - name: Extract IPv4 inside VM via SSH
+            - name: Extract IPv4 via SSH
               shell: |
                 sshpass -p '{{ cloud_init_password }}' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-                  root@{{ (vmi_network_info.resources[0].status.interfaces[0].ipAddresses[0] | default('127.0.0.1')) }} \
-                  "ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1"
+                root@{{ (vmi_network_info.resources[0].status.interfaces[0].ipAddresses[0] | default('127.0.0.1')) }} \
+                "ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1"
               register: vm_internal_ip
               ignore_errors: true
               changed_when: false
@@ -200,6 +200,8 @@
                 vm_ip: "{{ vm_internal_ip.stdout | trim }}"
                 vm_ipv4_addresses: [ "{{ vm_internal_ip.stdout | trim }}" ]
               when: vm_internal_ip.rc == 0 and vm_internal_ip.stdout != ""
+
+          when: vm_ip == 'No IPv4 assigned'
 
         - name: Fail if IPv4 still missing
           fail:
@@ -211,12 +213,12 @@
     - name: Check guest agent status
       set_fact:
         guest_agent_connected: >-
-          {{
-            (vmi_network_info.resources[0].status.conditions | default([]))
+          {%
+            set agent = (vmi_network_info.resources[0].status.conditions | default([]))
             | selectattr('type', 'equalto', 'AgentConnected')
-            | map(attribute='status')
-            | first | default('Unknown')
-          }}
+            | map(attribute='status') | first | default('Unknown')
+          %}
+          {{ agent }}
 
     - name: Save IPv4 for downstream jobs
       set_stats:
