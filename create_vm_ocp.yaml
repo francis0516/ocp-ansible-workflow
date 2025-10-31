@@ -16,9 +16,10 @@
     cloud_init_password: password
     ssh_timeout: 300
     network_attachment: br-ex-network
-    ip_wait_time: 30
+    
+    # Increased for guest agent to report IPv4
     ip_poll_interval: 10
-    max_ip_retries: 30
+    max_ip_retries: 18  # 18 * 10 = 180 seconds (3 minutes)
 
   tasks:
     - name: Display VM configuration
@@ -112,6 +113,11 @@
                           - systemctl enable sshd
       register: vm_creation
 
+    - name: Display VM creation result
+      debug:
+        msg: "VM {{ vm_name }} provisioned successfully in namespace {{ vm_project }}"
+      when: vm_creation.changed
+
     - name: Wait for DataVolume to be ready
       kubernetes.core.k8s_info:
         api_version: cdi.kubevirt.io/v1beta1
@@ -126,6 +132,10 @@
         - (dv_info.resources[0].status.phase | default('')) == "Succeeded"
       retries: 60
       delay: 10
+
+    - name: Display DataVolume status
+      debug:
+        msg: "DataVolume for {{ vm_name }} is ready (Phase: {{ dv_info.resources[0].status.phase }})"
 
     - name: Wait for VM to be running
       kubernetes.core.k8s_info:
@@ -142,11 +152,15 @@
       retries: 60
       delay: 10
 
-    - name: Wait for VM to get an IPv4 address
+    - name: Display VM running status
+      debug:
+        msg: "VM {{ vm_name }} is now running, waiting for guest agent to report IPv4..."
+
+    - name: Wait for VM to get an IPv4 address (with guest agent polling)
       vars:
         vm_ip: "No IPv4 assigned"
       block:
-        - name: Poll VM network info for IPv4
+        - name: Poll VM network info for IPv4 (waiting for guest agent)
           kubernetes.core.k8s_info:
             api_version: kubevirt.io/v1
             kind: VirtualMachineInstance
@@ -168,9 +182,22 @@
           retries: "{{ max_ip_retries }}"
           delay: "{{ ip_poll_interval }}"
 
+        - name: Display polling result
+          debug:
+            msg: "IPv4 address detected! Extracting..."
+
         - name: Extract IPv4 address safely
           set_fact:
-            vm_ip: >-
+            all_ip_addresses: >-
+              {{
+                (vmi_network_info.resources[0].status.interfaces | default([]))
+                | map(attribute='ipAddresses')
+                | select('defined')
+                | map('flatten')
+                | flatten
+                | list
+              }}
+            vm_ipv4_addresses: >-
               {{
                 (vmi_network_info.resources[0].status.interfaces | default([]))
                 | map(attribute='ipAddresses')
@@ -178,37 +205,115 @@
                 | map('flatten')
                 | flatten
                 | select('match', '^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
-                | first
-                | default('No IPv4 assigned')
+                | list
               }}
+
+        - name: Set VM IP to first IPv4
+          set_fact:
+            vm_ip: "{{ vm_ipv4_addresses[0] if vm_ipv4_addresses | length > 0 else 'No IPv4 assigned' }}"
+
+        - name: Display detected IP addresses
+          debug:
+            msg:
+              - "================================================"
+              - "Network Information for {{ vm_name }}"
+              - "================================================"
+              - "All IPs detected: {{ all_ip_addresses }}"
+              - "IPv4 Addresses: {{ vm_ipv4_addresses | join(', ') }}"
+              - "Selected IPv4 for SSH: {{ vm_ip }}"
+              - "================================================"
 
         - name: Fail if IPv4 is missing after retries
           fail:
-            msg: "No IPv4 address detected for {{ vm_name }} after waiting. Check DHCP/Multus."
+            msg: |
+              ERROR: No IPv4 address detected for {{ vm_name }} after {{ max_ip_retries * ip_poll_interval }} seconds
+              
+              All detected IPs: {{ all_ip_addresses }}
+              
+              This typically means:
+              1. Guest agent (qemu-guest-agent) is not installed in the golden image
+              2. Guest agent is not starting properly
+              3. DHCP is not providing IPv4 addresses
+              4. Network configuration issue
+              
+              Troubleshooting steps:
+              1. Check if VM has IPv4 inside guest OS:
+                 virtctl console {{ vm_name }} -n {{ vm_project }}
+                 ip addr show eth0
+              
+              2. Check if guest agent is running inside VM:
+                 systemctl status qemu-guest-agent
+              
+              3. Install guest agent if missing:
+                 dnf install qemu-guest-agent
+                 systemctl enable --now qemu-guest-agent
+              
+              4. Check network configuration:
+                 oc get network-attachment-definitions {{ network_attachment }} -n {{ vm_project }} -o yaml
           when: vm_ip == 'No IPv4 assigned'
 
-        - name: Display IPv4 extraction result
-          debug:
-            msg:
-              - "VM Name: {{ vm_name }}"
-              - "IPv4 Address: {{ vm_ip }}"
+    - name: Check guest agent status
+      set_fact:
+        guest_agent_connected: >-
+          {{
+            (vmi_network_info.resources[0].status.conditions | default([])
+            | selectattr('type', 'equalto', 'AgentConnected')
+            | map(attribute='status')
+            | first | default('Unknown'))
+          }}
+
+    - name: Display guest agent status
+      debug:
+        msg: "Guest agent connected: {{ guest_agent_connected }}"
 
     - name: Save IPv4 for downstream jobs
       set_stats:
         data:
           vm_ip: "{{ vm_ip }}"
+          vm_ipv4: "{{ vm_ipv4_addresses | join(',') }}"
           vm_name: "{{ vm_name }}"
           vm_project: "{{ vm_project }}"
         per_host: no
+
+    - name: Get VM information
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_project }}"
+        validate_certs: no
+      register: vm_info
+
+    - name: Display VM information
+      debug:
+        msg:
+          - "VM Name: {{ vm_info.resources[0].metadata.name }}"
+          - "Namespace: {{ vm_info.resources[0].metadata.namespace }}"
+          - "CPU Cores: {{ vm_info.resources[0].spec.template.spec.domain.cpu.cores }}"
+          - "CPU Sockets: {{ vm_info.resources[0].spec.template.spec.domain.cpu.sockets }}"
+          - "CPU Threads: {{ vm_info.resources[0].spec.template.spec.domain.cpu.threads }}"
+          - "Memory: {{ vm_info.resources[0].spec.template.spec.domain.memory.guest }}"
+          - "Storage Size: {{ storage_size }}"
+          - "Storage Class: {{ storage_class }}"
+          - "VM Status: {{ vm_info.resources[0].status.printableStatus | default('Starting') }}"
+          - "Network: {{ network_attachment }}"
 
     - name: Deployment Summary
       debug:
         msg:
           - "======================================"
           - "VM Deployment Complete Successfully!"
+          - "======================================"
           - "VM Name: {{ vm_name }}"
           - "IPv4 Address: {{ vm_ip }}"
+          - "All IPv4 Addresses: {{ vm_ipv4_addresses | join(', ') }}"
           - "Username: root"
           - "Password: {{ cloud_init_password }}"
           - "Network: {{ network_attachment }}"
+          - "Guest Agent: {{ guest_agent_connected }}"
           - "======================================"
+          - "Variables exported for downstream jobs:"
+          - "  - vm_ip: {{ vm_ip }}"
+          - "  - vm_name: {{ vm_name }}"
+          - "  - vm_project: {{ vm_project }}"
+          - "=========================================="
