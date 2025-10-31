@@ -124,7 +124,7 @@
         - dv_info.resources is defined
         - dv_info.resources | length > 0
         - (dv_info.resources[0].status.phase | default('')) == "Succeeded"
-      retries: 30
+      retries: 60
       delay: 10
 
     - name: Wait for VM to be running
@@ -139,7 +139,7 @@
         - vmi_info.resources is defined
         - vmi_info.resources | length > 0
         - (vmi_info.resources[0].status.phase | default('')) == "Running"
-      retries: 30
+      retries: 60
       delay: 10
 
     - name: Wait for VM to get an IPv4 address
