@@ -155,20 +155,21 @@
 
     - name: Debug - Show all interfaces
       debug:
-        msg: "{{ vmi_network_info.resources[0].status.interfaces | default([]) }}"
+        var: vmi_network_info.resources[0].status.interfaces
 
-    - name: Extract IPv4 address safely
+    - name: Extract IPv4 address safely from all interfaces
       set_fact:
         all_ip_addresses: >-
           {{
-            (
-              vmi_network_info.resources[0].status.interfaces[0].ipAddresses
-              if (vmi_network_info.resources[0].status.interfaces[0].ipAddresses is defined)
-              else [ vmi_network_info.resources[0].status.interfaces[0].ipAddress ]
-            ) | default([])
+            vmi_network_info.resources[0].status.interfaces
+            | map('extract', 'ipAddresses')
+            | select('defined')
+            | map('flatten')
+            | flatten
+            | list
           }}
-        vm_ipv4_addresses: "{{ all_ip_addresses | select('match', '^(\\d{1,3}\\.){3}\\d{1,3}$') | list }}"
-        vm_ip: "{{ (vm_ipv4_addresses | first) | default('No IPv4 assigned') }}"
+        ipv4_candidates: "{{ all_ip_addresses | select('match', '^(\\d{1,3}\\.){3}\\d{1,3}$') | list }}"
+        vm_ip: "{{ (ipv4_candidates | first) | default('No IPv4 assigned') }}"
       when:
         - vmi_network_info.resources is defined
         - vmi_network_info.resources | length > 0
@@ -181,7 +182,7 @@
           - "======================================"
           - "VM Name: {{ vm_name }}"
           - "All IPs Detected: {{ all_ip_addresses | join(', ') | default('None') }}"
-          - "IPv4 Addresses: {{ vm_ipv4_addresses | join(', ') | default('None detected') }}"
+          - "IPv4 Addresses: {{ ipv4_candidates | join(', ') | default('None detected') }}"
           - "Selected IPv4: {{ vm_ip }}"
           - "======================================"
 
@@ -190,7 +191,7 @@
         msg: |
           No IPv4 address detected for {{ vm_name }}.
           Verify that DHCP is enabled and the Multus network ({{ network_attachment }}) provides IPv4.
-      when: vm_ipv4_addresses | length == 0
+      when: ipv4_candidates | length == 0
 
     - name: Save IPv4 for downstream jobs
       set_stats:
