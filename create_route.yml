@@ -1,20 +1,29 @@
 ---
 - hosts: localhost
   gather_facts: no
+  vars:
+    vm_name: "{{ vm_name | default('apache-vm') }}"
+    vm_namespace: "{{ vm_namespace | default('vm-migration-test') }}"
+
   tasks:
     - name: Get VM information
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
         kind: VirtualMachine
-        name: "{{ vm_name | default('apache-vm') }}"
-        namespace: "{{ vm_namespace | default('vm-migration-test') }}"
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_namespace }}"
       register: vm_info
       ignore_errors: yes
 
     - name: Display VM labels for debugging
       debug:
-        msg: "VM Labels: {{ vm_info.resources[0].metadata.labels }}"
+        msg: "VM Labels: {{ vm_info.resources[0].metadata.labels | default({}) }}"
       when: vm_info.resources | length > 0
+
+    - name: Fail if VM does not exist
+      fail:
+        msg: "❌ VM '{{ vm_name }}' not found in namespace '{{ vm_namespace }}'. Check creation step."
+      when: vm_info.resources | length == 0
 
     - name: Create Service for Apache VM
       kubernetes.core.k8s:
@@ -23,13 +32,13 @@
           apiVersion: v1
           kind: Service
           metadata:
-            name: "{{ vm_name | default('apache-vm') }}-service"
-            namespace: "{{ vm_namespace | default('vm-migration-test') }}"
+            name: "{{ vm_name }}-service"
+            namespace: "{{ vm_namespace }}"
             labels:
-              app: "{{ vm_name | default('apache-vm') }}"
+              app: "{{ vm_name }}"
           spec:
             selector:
-              vm.kubevirt.io/name: "{{ vm_name | default('apache-vm') }}"
+              vm.kubevirt.io/name: "{{ vm_name }}"
             ports:
               - name: http
                 protocol: TCP
@@ -41,24 +50,23 @@
       kubernetes.core.k8s_info:
         api_version: v1
         kind: Endpoints
-        name: "{{ vm_name | default('apache-vm') }}-service"
-        namespace: "{{ vm_namespace | default('vm-migration-test') }}"
+        name: "{{ vm_name }}-service"
+        namespace: "{{ vm_namespace }}"
       register: service_endpoints
 
     - name: Display Service endpoint status
       debug:
-        msg: 
-          - "Service Endpoints: {{ service_endpoints.resources[0].subsets | default([]) }}"
-      when: 
+        msg: "Service Endpoints: {{ service_endpoints.resources[0].subsets | default([]) }}"
+      when:
         - service_endpoints.resources | length > 0
         - service_endpoints.resources[0].subsets is defined
         - service_endpoints.resources[0].subsets | length > 0
 
     - name: Display warning if no endpoints found
       debug:
-        msg: "Warning: No endpoints found! Check if VM selector matches."
-      when: 
-        - service_endpoints.resources | length == 0 or 
+        msg: "⚠ Warning: No endpoints found! Check if VM selector matches."
+      when:
+        - service_endpoints.resources | length == 0 or
           service_endpoints.resources[0].subsets is not defined or
           service_endpoints.resources[0].subsets | length == 0
 
@@ -69,14 +77,14 @@
           apiVersion: route.openshift.io/v1
           kind: Route
           metadata:
-            name: "{{ vm_name | default('apache-vm') }}-route"
-            namespace: "{{ vm_namespace | default('vm-migratio-test') }}"
+            name: "{{ vm_name }}-route"
+            namespace: "{{ vm_namespace }}"
             labels:
-              app: "{{ vm_name | default('apache-vm') }}"
+              app: "{{ vm_name }}"
           spec:
             to:
               kind: Service
-              name: "{{ vm_name | default('apache-vm') }}-service"
+              name: "{{ vm_name }}-service"
               weight: 100
             port:
               targetPort: http
@@ -85,54 +93,44 @@
               insecureEdgeTerminationPolicy: Redirect
             wildcardPolicy: None
 
-    - name: Wait for Route to be ready
+    - name: Wait for Route to have a host
       kubernetes.core.k8s_info:
         api_version: route.openshift.io/v1
         kind: Route
-        name: "{{ vm_name | default('apache-vm') }}-route"
-        namespace: "{{ vm_namespace | default('vm-migration-test') }}"
+        name: "{{ vm_name }}-route"
+        namespace: "{{ vm_namespace }}"
       register: route_info
-      until: route_info.resources[0].spec.host is defined
+      until: route_info.resources[0].spec.host is defined and route_info.resources[0].spec.host | default('') != ''
       retries: 10
-      delay: 2
+      delay: 3
 
     - name: Get Route status details
       kubernetes.core.k8s_info:
         api_version: route.openshift.io/v1
         kind: Route
-        name: "{{ vm_name | default('apache-vm') }}-route"
-        namespace: "{{ vm_namespace | default('vm-migration-test') }}"
+        name: "{{ vm_name }}-route"
+        namespace: "{{ vm_namespace }}"
       register: route_status
 
     - name: Display deployment information
       debug:
         msg:
-          - "==========================================================================================================================================="
+          - "=================================================================="
           - "Henogez WebServer Route Created Successfully!"
-          - "==========================================================================================================================================="
+          - "=================================================================="
           - "   Access your web server at:"
-          - ""
-          - "   External URL (HTTPS):"
-          - "   https://{{ route_info.resources[0].spec.host }}"
-          - ""
-          - "   External URL (HTTP - will redirect):"
-          - "   http://{{ route_info.resources[0].spec.host }}"
-          - ""
-          - "   Internal Service:"
-          - "   http://{{ vm_name | default('apache-vm') }}-service.{{ vm_namespace | default('vm-migration') }}.svc.cluster.local"
-          - ""
+          - "   External URL (HTTPS): https://{{ route_info.resources[0].spec.host | default('Not ready') }}"
+          - "   External URL (HTTP - will redirect): http://{{ route_info.resources[0].spec.host | default('Not ready') }}"
+          - "   Internal Service: http://{{ vm_name }}-service.{{ vm_namespace }}.svc.cluster.local"
           - "   Resource Details:"
-          - "   VM Name: {{ vm_name | default('apache-vm') }}"
-          - "   Namespace: {{ vm_namespace | default('vm-migration-test') }}"
-          - "   Service: {{ vm_name | default('apache-vm') }}-service"
-          - "   Route: {{ vm_name | default('apache-vm') }}-route"
-          - ""
-          - "   Route Status:"
-          - "   Admitted: {{ route_status.resources[0].status.ingress[0].conditions[0].status | default('Unknown') }}"
-          - ""
-          - "   Troubleshooting Commands:"
-          - "   oc get svc {{ vm_name | default('apache-vm') }}-service -n {{ vm_namespace | default('vm-migration-test') }}"
-          - "   oc get endpoints {{ vm_name | default('apache-vm') }}-service -n {{ vm_namespace | default('vm-migration-test') }}"
-          - "   oc get route {{ vm_name | default('ginger-vm') }}-route -n {{ vm_namespace | default('vm-migration') }}"
-          - "   curl -k https://{{ route_info.resources[0].spec.host }}"
-          - "==================================================================================================================================================="
+          - "   VM Name: {{ vm_name }}"
+          - "   Namespace: {{ vm_namespace }}"
+          - "   Service: {{ vm_name }}-service"
+          - "   Route: {{ vm_name }}-route"
+          - "   Route Status: {{ route_status.resources[0].status.ingress[0].conditions[0].status | default('Unknown') }}"
+          - "=================================================================="
+          - "Troubleshooting commands:"
+          - "oc get svc {{ vm_name }}-service -n {{ vm_namespace }}"
+          - "oc get endpoints {{ vm_name }}-service -n {{ vm_namespace }}"
+          - "oc get route {{ vm_name }}-route -n {{ vm_namespace }}"
+          - "curl -k https://{{ route_info.resources[0].spec.host | default('') }}"
