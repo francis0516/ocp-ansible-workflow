@@ -1,7 +1,9 @@
 ---
 - hosts: localhost
   gather_facts: false
+
   vars:
+    # Default VM variables in case they are not passed
     vm_name: "{{ vm_name | default('apache-vm') }}"
     vm_namespace: "{{ vm_namespace | default('vm-migration-test') }}"
 
@@ -54,21 +56,22 @@
         name: "{{ vm_name }}-service"
         namespace: "{{ vm_namespace }}"
       register: service_endpoints
-      ignore_errors: yes
 
     - name: Display Service endpoint status
       debug:
         msg: "Service Endpoints: {{ (service_endpoints.resources | default([{}]))[0].subsets | default([]) }}"
       when:
         - (service_endpoints.resources | default([])) | length > 0
-        - (service_endpoints.resources[0].subsets | default([])) | length > 0
+        - (service_endpoints.resources[0].subsets is defined) 
+        - (service_endpoints.resources[0].subsets | length > 0)
 
     - name: Display warning if no endpoints found
       debug:
         msg: "⚠ Warning: No endpoints found! Check if VM selector matches."
       when:
         - (service_endpoints.resources | default([])) | length == 0 or
-          (service_endpoints.resources[0].subsets | default([])) | length == 0
+          service_endpoints.resources[0].subsets is not defined or
+          service_endpoints.resources[0].subsets | length == 0
 
     - name: Create Route for Apache VM
       kubernetes.core.k8s:
@@ -102,7 +105,7 @@
       register: route_info
       until: (route_info.resources | default([{}]))[0].spec.host is defined
       retries: 10
-      delay: 3
+      delay: 2
 
     - name: Get Route status details
       kubernetes.core.k8s_info:
@@ -111,7 +114,6 @@
         name: "{{ vm_name }}-route"
         namespace: "{{ vm_namespace }}"
       register: route_status
-      ignore_errors: yes
 
     - name: Display deployment information
       debug:
