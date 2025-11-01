@@ -18,7 +18,7 @@
 
     # Guest agent IPv4 polling
     ip_poll_interval: 10
-    max_ip_retries: 18  # 3 minutes
+    max_ip_retries: 180  # 3 minutes
 
   tasks:
     - name: Display VM configuration
