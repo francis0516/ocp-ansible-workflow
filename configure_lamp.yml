@@ -1,18 +1,8 @@
 ---
-- hosts: localhost
-  gather_facts: no
-  tasks:
-    - name: Add VM to inventory
-      add_host:
-        name: "{{ vm_ip }}"
-        groups: target_vm
-        ansible_user: root
-        ansible_password: "{{ cloud_init_password | default('password') }}"
-        ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
-
 - hosts: target_vm
   gather_facts: yes
   become: yes
+
   tasks:
     - name: Install Apache (httpd) package
       dnf:
