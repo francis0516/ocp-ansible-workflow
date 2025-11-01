@@ -5,6 +5,8 @@
   gather_facts: false
 
   vars:
+    vm_name: apache-vm            # Add your VM name here
+    vm_project: vm-migration-test # Add your VM namespace/project here
     ssh_timeout: 300
     max_ip_wait: 300
     ip_poll_interval: 10
