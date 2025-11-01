@@ -1,94 +1,99 @@
 ---
 - hosts: localhost
   gather_facts: no
-  tasks:
-    - name: Load VM IP from fact file
-      include_vars:
-        file: /tmp/vm_ip.fact
-      ignore_errors: yes
-
-    - name: Fail if vm_ip is not defined
-      fail:
-        msg: "VM IP not found. Ensure wait_for_ssh.yml has run successfully."
-      when: vm_ip is not defined
-
-    - name: Add VM to dynamic inventory
-      add_host:
-        name: "{{ vm_ip }}"
-        groups: target_vm
-        ansible_user: root
-        ansible_password: "{{ cloud_init_password | default('password') }}"
-        ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
-
-- hosts: target_vm
-  gather_facts: yes
   vars:
+    vm_password: "{{ cloud_init_password | default('password') }}"
+    vm_ip: "{{ vm_ip | default(omit) }}"
     rhel_username: "info@pacetechsystems.com"
     rhel_password: "Silverado@8787!!!!"
 
   tasks:
-    - name: Disable SELinux
+    - name: Fail if vm_ip is undefined
+      fail:
+        msg: "vm_ip is not defined. Make sure the wait_for_ssh playbook ran successfully."
+      when: vm_ip is not defined
+
+    - name: Add VM to dynamic inventory
+      add_host:
+        name: target_vm_host
+        ansible_host: "{{ vm_ip }}"
+        ansible_user: root
+        ansible_password: "{{ vm_password }}"
+        ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+        groups: vms
+
+    - name: Display VM inventory info
+      debug:
+        msg: "VM {{ vm_ip }} added to dynamic group 'vms' for post-installation tasks"
+
+- hosts: vms
+  gather_facts: no
+  vars:
+    rhel_username: "<YOUR_RH_USERNAME>"
+    rhel_password: "Silverado@8787!!!!"
+
+  tasks:
+    - name: Disable SELinux on RHEL/CentOS
       replace:
         path: /etc/selinux/config
-        regexp: 'SELINUX=enforcing'
+        regexp: '^SELINUX=enforcing'
         replace: 'SELINUX=disabled'
 
     - name: Disable IPv6
-      sysctl:
-        name: "{{ item.key }}"
-        value: "{{ item.value }}"
+      lineinfile:
+        path: /etc/sysctl.conf
+        line: "{{ item }}"
         state: present
-        reload: yes
       loop:
-        - { key: net.ipv6.conf.all.disable_ipv6, value: 1 }
-        - { key: net.ipv6.conf.default.disable_ipv6, value: 1 }
+        - net.ipv6.conf.all.disable_ipv6 = 1
+        - net.ipv6.conf.default.disable_ipv6 = 1
 
-    - name: Register RHEL subscription (required for repos)
-      redhat_subscription:
-        state: present
-        username: "{{ rhel_username }}"
-        password: "{{ rhel_password }}"
+    - name: Apply sysctl changes
+      command: sysctl -p
+
+    - name: Register RHEL subscription
+      shell: |
+        subscription-manager register --username={{ rhel_username }} --password={{ rhel_password }} --auto-attach
       register: rh_subscribe
       ignore_errors: yes
 
-    - name: Enable RHEL repos
-      yum_repository:
-        name: rhel-9-baseos-rpms
-        description: RHEL 9 BaseOS
-        baseurl: https://cdn.redhat.com/content/dist/rhel9/9/x86_64/baseos/os
-        enabled: yes
-        gpgcheck: yes
-        gpgkey: file:///etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release
+    - name: Enable required RHEL repos
+      shell: |
+        subscription-manager repos \
+          --enable=rhel-9-for-x86_64-baseos-rpms \
+          --enable=rhel-9-for-x86_64-appstream-rpms
       when: rh_subscribe is succeeded
+      ignore_errors: yes
 
-    - name: Install basic packages
+    - name: Install software packages
       yum:
-        name:
-          - vim
-          - wget
-          - telnet
-          - nc
-          - rsyslog
-          - net-tools
-          - bind-utils
-          - unzip
-          - traceroute
-          - lsof
-          - psmisc
-          - yum-utils
-          - java-11-openjdk-devel
+        name: "{{ item }}"
         state: present
+      loop:
+        - vim
+        - wget
+        - telnet
+        - nc
+        - rsyslog
+        - net-tools
+        - bind-utils
+        - unzip
+        - traceroute
+        - lsof
+        - psmisc
+        - yum-utils
+        - java-11-openjdk-devel
 
     - name: Update all packages
       yum:
         name: "*"
         state: latest
 
-    - name: Reboot server
+    - name: Reboot VM
       reboot:
         reboot_timeout: 3000
         test_command: "uptime"
-      register: uptime
 
-    - debug:
-        var: uptime
+    - name: Confirm reboot
+      wait_for_connection:
+        timeout: 300
