@@ -1,64 +1,38 @@
 ---
 - hosts: localhost
-  gather_facts: no
+  gather_facts: false
   tasks:
+    - name: Load vm_ip from temporary file
+      set_fact:
+        vm_ip: "{{ lookup('file', '/tmp/vm_ip.txt') }}"
+
     - name: Fail if vm_ip is not defined
       fail:
-        msg: "vm_ip is not defined. Make sure the wait_for_ssh playbook ran successfully."
-      when: vm_ip is not defined
-
-    - name: Add VM to dynamic inventory
-      add_host:
-        name: target_vm_host
-        ansible_host: "{{ vm_ip }}"
-        ansible_user: root
-        ansible_password: "{{ cloud_init_password | default('password') }}"
-        ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
-        groups: vms
-
-    - name: Display VM inventory info
-      debug:
-        msg: "VM {{ vm_ip }} added to dynamic group 'vms' for post-installation tasks"
+        msg: "❌ vm_ip is not defined. Make sure wait_for_ssh.yml ran successfully."
+      when: vm_ip == "" or vm_ip is not defined
 
 - hosts: vms
-  gather_facts: no
-  vars:
-    rhel_username: "info@pacetechsystems.com"
-    rhel_password: "Silverado@8787!!!!"
-
+  gather_facts: false
   tasks:
     - name: Disable SELinux
       replace:
         path: /etc/selinux/config
-        regexp: '^SELINUX=enforcing'
+        regexp: 'SELINUX=enforcing'
         replace: 'SELINUX=disabled'
 
     - name: Disable IPv6
       lineinfile:
         path: /etc/sysctl.conf
         line: "{{ item }}"
+        state: present
       loop:
         - net.ipv6.conf.all.disable_ipv6 = 1
         - net.ipv6.conf.default.disable_ipv6 = 1
 
-    - name: Apply sysctl changes
+    - name: Reload sysctl
       command: sysctl -p
 
-    - name: Register RHEL subscription
-      shell: |
-        subscription-manager register --username={{ rhel_username }} --password={{ rhel_password }} --auto-attach
-      register: rh_subscribe
-      ignore_errors: yes
-
-    - name: Enable required RHEL repos
-      shell: |
-        subscription-manager repos \
-          --enable=rhel-9-for-x86_64-baseos-rpms \
-          --enable=rhel-9-for-x86_64-appstream-rpms
-      when: rh_subscribe.rc == 0
-      ignore_errors: yes
-
-    - name: Install software packages
+    - name: Install required packages
       yum:
         name: "{{ item }}"
         state: present
@@ -82,11 +56,7 @@
         name: "*"
         state: latest
 
-    - name: Reboot VM
+    - name: Reboot the VM
       reboot:
-        reboot_timeout: 3000
-        test_command: "uptime"
-
-    - name: Confirm reboot
-      wait_for_connection:
-        timeout: 300
+        reboot_timeout: 300
+        test_command: uptime
