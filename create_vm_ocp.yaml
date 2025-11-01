@@ -138,8 +138,14 @@
       retries: 60
       delay: 10
 
+    - name: Initialize IPv4 facts
+      set_fact:
+        vm_ipv4_addresses: []
+        vm_ip: "No IPv4 assigned"
+
     - name: Poll VM for IPv4 address (guest agent or SSH fallback)
       block:
+
         - name: Poll VMI status for IPv4 (guest agent)
           kubernetes.core.k8s_info:
             api_version: kubevirt.io/v1
@@ -179,8 +185,8 @@
         - name: Debug detected guest agent IPs
           debug:
             msg:
-              - "Detected IPv4 addresses via guest agent: {{ vm_ipv4_addresses | default([]) | join(', ') }}"
-              - "Selected primary IP: {{ vm_ip | default('No IPv4 assigned') }}"
+              - "Detected IPv4 addresses via guest agent: {{ vm_ipv4_addresses | join(', ') }}"
+              - "Selected primary IP: {{ vm_ip }}"
 
         - name: Fallback Extract IPv4 via SSH if guest agent failed
           when: vm_ip == 'No IPv4 assigned'
@@ -196,8 +202,8 @@
             - name: Extract IPv4 via SSH
               shell: |
                 sshpass -p '{{ cloud_init_password }}' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-                  root@{{ (vmi_network_info.resources[0].status.interfaces[0].ipAddresses[0] | default('127.0.0.1')) }} \
-                  "ip -4 addr show eth0 | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){3}' | head -1"
+                root@{{ (vmi_network_info.resources[0].status.interfaces[0].ipAddresses[0] | default('127.0.0.1')) }} \
+                "ip -4 addr show eth0 | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){3}' | head -1"
               register: vm_internal_ip
               ignore_errors: true
               changed_when: false
