@@ -17,6 +17,7 @@
       vars:
         attempt: 0
       block:
+
         - name: Get VM interface info
           kubernetes.core.k8s_info:
             api_version: kubevirt.io/v1
@@ -37,10 +38,10 @@
             - vmi_info.resources | length > 0
             - vmi_info.resources[0].status.interfaces is defined
             - vmi_info.resources[0].status.interfaces[0].ipAddress is defined
+          until: vm_ip is defined and vm_ip != ''
+          retries: "{{ (max_ip_wait // ip_poll_interval) | int }}"
+          delay: "{{ ip_poll_interval }}"
           ignore_errors: true
-      until: vm_ip is defined and vm_ip != ''
-      retries: "{{ (max_ip_wait // ip_poll_interval) | int }}"
-      delay: "{{ ip_poll_interval }}"
 
     - name: Wait for SSH port 22 to be available
       wait_for:
