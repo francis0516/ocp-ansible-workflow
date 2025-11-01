@@ -1,14 +1,8 @@
 ---
 - hosts: localhost
   gather_facts: no
-  vars:
-    vm_password: "{{ cloud_init_password | default('password') }}"
-    vm_ip: "{{ vm_ip | default(omit) }}"
-    rhel_username: "info@pacetechsystems.com"
-    rhel_password: "Silverado@8787!!!!"
-
   tasks:
-    - name: Fail if vm_ip is undefined
+    - name: Fail if vm_ip is not defined
       fail:
         msg: "vm_ip is not defined. Make sure the wait_for_ssh playbook ran successfully."
       when: vm_ip is not defined
@@ -18,7 +12,7 @@
         name: target_vm_host
         ansible_host: "{{ vm_ip }}"
         ansible_user: root
-        ansible_password: "{{ vm_password }}"
+        ansible_password: "{{ cloud_init_password | default('password') }}"
         ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
         groups: vms
 
@@ -29,11 +23,11 @@
 - hosts: vms
   gather_facts: no
   vars:
-    rhel_username: "<YOUR_RH_USERNAME>"
+    rhel_username: "info@pacetechsystems.com"
     rhel_password: "Silverado@8787!!!!"
 
   tasks:
-    - name: Disable SELinux on RHEL/CentOS
+    - name: Disable SELinux
       replace:
         path: /etc/selinux/config
         regexp: '^SELINUX=enforcing'
@@ -43,7 +37,6 @@
       lineinfile:
         path: /etc/sysctl.conf
         line: "{{ item }}"
-        state: present
       loop:
         - net.ipv6.conf.all.disable_ipv6 = 1
         - net.ipv6.conf.default.disable_ipv6 = 1
@@ -62,7 +55,7 @@
         subscription-manager repos \
           --enable=rhel-9-for-x86_64-baseos-rpms \
           --enable=rhel-9-for-x86_64-appstream-rpms
-      when: rh_subscribe is succeeded
+      when: rh_subscribe.rc == 0
       ignore_errors: yes
 
     - name: Install software packages
