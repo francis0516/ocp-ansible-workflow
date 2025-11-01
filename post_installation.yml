@@ -1,18 +1,8 @@
 ---
-- hosts: localhost
-  gather_facts: false
-  tasks:
-    - name: Load vm_ip from temporary file
-      set_fact:
-        vm_ip: "{{ lookup('file', '/tmp/vm_ip.txt') }}"
-
-    - name: Fail if vm_ip is not defined
-      fail:
-        msg: "❌ vm_ip is not defined. Make sure wait_for_ssh.yml ran successfully."
-      when: vm_ip == "" or vm_ip is not defined
-
 - hosts: vms
-  gather_facts: false
+  gather_facts: yes
+  become: yes
+
   tasks:
     - name: Disable SELinux
       replace:
