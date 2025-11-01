@@ -1,11 +1,12 @@
 ---
 - hosts: localhost
-  gather_facts: no
+  gather_facts: false
   vars:
     vm_name: "{{ vm_name | default('apache-vm') }}"
     vm_namespace: "{{ vm_namespace | default('vm-migration-test') }}"
 
   tasks:
+
     - name: Get VM information
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
@@ -53,22 +54,21 @@
         name: "{{ vm_name }}-service"
         namespace: "{{ vm_namespace }}"
       register: service_endpoints
+      ignore_errors: yes
 
     - name: Display Service endpoint status
       debug:
-        msg: "Service Endpoints: {{ (service_endpoints.resources[0].subsets | default([])) }}"
+        msg: "Service Endpoints: {{ (service_endpoints.resources | default([{}]))[0].subsets | default([]) }}"
       when:
-        - service_endpoints.resources | default([]) | length > 0
-        - service_endpoints.resources[0].subsets is defined
-        - service_endpoints.resources[0].subsets | length > 0
+        - (service_endpoints.resources | default([])) | length > 0
+        - (service_endpoints.resources[0].subsets | default([])) | length > 0
 
     - name: Display warning if no endpoints found
       debug:
         msg: "⚠ Warning: No endpoints found! Check if VM selector matches."
-      when: 
-        - service_endpoints.resources | default([]) | length == 0 or
-          service_endpoints.resources[0].subsets is not defined or
-          service_endpoints.resources[0].subsets | length == 0
+      when:
+        - (service_endpoints.resources | default([])) | length == 0 or
+          (service_endpoints.resources[0].subsets | default([])) | length == 0
 
     - name: Create Route for Apache VM
       kubernetes.core.k8s:
@@ -102,7 +102,7 @@
       register: route_info
       until: (route_info.resources | default([{}]))[0].spec.host is defined
       retries: 10
-      delay: 2
+      delay: 3
 
     - name: Get Route status details
       kubernetes.core.k8s_info:
@@ -111,6 +111,7 @@
         name: "{{ vm_name }}-route"
         namespace: "{{ vm_namespace }}"
       register: route_status
+      ignore_errors: yes
 
     - name: Display deployment information
       debug:
@@ -118,14 +119,14 @@
           - "==========================================================================="
           - "Henogez WebServer Route Created Successfully!"
           - "==========================================================================="
-          - "Access your web server at:"
-          - "External URL (HTTPS): https://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
-          - "External URL (HTTP - will redirect): http://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
-          - "Internal Service: http://{{ vm_name }}-service.{{ vm_namespace }}.svc.cluster.local"
-          - "Resource Details:"
-          - "VM Name: {{ vm_name }}"
-          - "Namespace: {{ vm_namespace }}"
-          - "Service: {{ vm_name }}-service"
-          - "Route: {{ vm_name }}-route"
-          - "Route Status: Admitted: {{ (route_status.resources | default([{}]))[0].status.ingress[0].conditions[0].status | default('Unknown') }}"
+          - "   Access your web server at:"
+          - "   External URL (HTTPS): https://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
+          - "   External URL (HTTP - will redirect): http://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
+          - "   Internal Service: http://{{ vm_name }}-service.{{ vm_namespace }}.svc.cluster.local"
+          - "   Resource Details:"
+          - "   VM Name: {{ vm_name }}"
+          - "   Namespace: {{ vm_namespace }}"
+          - "   Service: {{ vm_name }}-service"
+          - "   Route: {{ vm_name }}-route"
+          - "   Route Status: Admitted: {{ (route_status.resources | default([{}]))[0].status.ingress[0].conditions[0].status | default('Unknown') }}"
           - "==========================================================================="
