@@ -2,7 +2,17 @@
 - hosts: localhost
   gather_facts: no
   tasks:
-    - name: Add VM to inventory
+    - name: Load VM IP from fact file
+      include_vars:
+        file: /tmp/vm_ip.fact
+      ignore_errors: yes
+
+    - name: Fail if vm_ip is not defined
+      fail:
+        msg: "VM IP not found. Ensure wait_for_ssh.yml has run successfully."
+      when: vm_ip is not defined
+
+    - name: Add VM to dynamic inventory
       add_host:
         name: "{{ vm_ip }}"
         groups: target_vm
@@ -11,64 +21,74 @@
         ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
 
 - hosts: target_vm
-  gather_facts: no
+  gather_facts: yes
+  vars:
+    rhel_username: "info@pacetechsystems.com"
+    rhel_password: "Silverado@8787!!!!"
+
   tasks:
-    - name: Disable SElinux on CentOS
+    - name: Disable SELinux
       replace:
-        path: /etc/sysconfig/selinux
+        path: /etc/selinux/config
         regexp: 'SELINUX=enforcing'
         replace: 'SELINUX=disabled'
 
-    - name: Disable IPv6 on CentOS-9
-      lineinfile:
-        path: /etc/sysctl.conf
-        line: "{{ item }}"
+    - name: Disable IPv6
+      sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
         state: present
-      with_items:
-        - net.ipv6.conf.all.disable_ipv6 = 1
-        - net.ipv6.conf.default.disable_ipv6 = 1
+        reload: yes
+      loop:
+        - { key: net.ipv6.conf.all.disable_ipv6, value: 1 }
+        - { key: net.ipv6.conf.default.disable_ipv6, value: 1 }
 
-    - name: Restart systemd-sysctl service
-      service:
-        name: systemd-sysctl
-        state: restarted
-        enabled: no
-
-    - name: Enable IPv6 Changes
-      command: sysctl -p 
-
-    - name: Installation of multiple software packages on RHEL
-      yum: 
-        name: "{{ item }}"
+    - name: Register RHEL subscription (required for repos)
+      redhat_subscription:
         state: present
-      with_items:
-        - vim
-        - wget
-        - telnet
-        - nc
-        - rsyslog
-        - net-tools
-        - bind-utils
-        - unzip
-        - traceroute
-        - lsof
-        - psmisc
-        - yum-utils
-        - java-11-openjdk-devel
-        
-    - debug:
-        msg:
-          - "All Basic Application Installation is Successfully Installed"
+        username: "{{ rhel_username }}"
+        password: "{{ rhel_password }}"
+      register: rh_subscribe
+      ignore_errors: yes
+
+    - name: Enable RHEL repos
+      yum_repository:
+        name: rhel-9-baseos-rpms
+        description: RHEL 9 BaseOS
+        baseurl: https://cdn.redhat.com/content/dist/rhel9/9/x86_64/baseos/os
+        enabled: yes
+        gpgcheck: yes
+        gpgkey: file:///etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release
+      when: rh_subscribe is succeeded
+
+    - name: Install basic packages
+      yum:
+        name:
+          - vim
+          - wget
+          - telnet
+          - nc
+          - rsyslog
+          - net-tools
+          - bind-utils
+          - unzip
+          - traceroute
+          - lsof
+          - psmisc
+          - yum-utils
+          - java-11-openjdk-devel
+        state: present
 
     - name: Update all packages
       yum:
         name: "*"
         state: latest
-    
-    - name: reboot server 
+
+    - name: Reboot server
       reboot:
         reboot_timeout: 3000
         test_command: "uptime"
       register: uptime
 
-    - debug: var=uptime
+    - debug:
+        var: uptime
