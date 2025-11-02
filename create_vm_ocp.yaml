@@ -142,7 +142,7 @@
       until:
         - vmi_info.resources | length > 0
         - vmi_info.resources[0].status.phase == "Running"
-      retries: 60
+      retries: 20
       delay: 10
 
     - name: Initialize IPv4 facts
