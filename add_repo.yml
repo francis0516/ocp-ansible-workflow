@@ -1,5 +1,5 @@
 ---
-- name: Add RHEL repositories to apache-vm
+- name: Register apache-vm and enable RHEL repositories
   hosts: localhost
   gather_facts: false
 
@@ -13,45 +13,49 @@
       - rhel-9-for-x86_64-baseos-rpms
       - rhel-9-for-x86_64-appstream-rpms
       - codeready-builder-for-rhel-9-x86_64-rpms
-    kubeconfig_path: "/etc/kubernetes/static-pod-resources/kube-apiserver-certs/secrets/node-kubeconfigs/localhost.kubeconfig"  # <-- set path to your kubeconfig here
     registration_retries: 3
     registration_delay: 10
 
   tasks:
-    - name: Get the pod backing the VM
-      command: >
-        oc --kubeconfig {{ kubeconfig_path }} get pod -n {{ vm_namespace }}
-        -l kubevirt.io/domain={{ vm_name }}
-        -o jsonpath='{.items[0].metadata.name}'
-      register: vm_pod
+    - name: Get VM info from KubeVirt
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_namespace }}"
+      register: vm_info
       retries: 10
       delay: 5
-      until: vm_pod.stdout != ""
+      until: vm_info.resources | length > 0
 
-    - name: Get the IPv4 address of the VM
-      command: >
-        oc --kubeconfig {{ kubeconfig_path }} exec -n {{ vm_namespace }} {{ vm_pod.stdout }}
-        -- ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}'
-      register: vm_ipv4
-      retries: 10
-      delay: 5
-      until: vm_ipv4.stdout != ""
+    - name: Extract VM IPv4 address
+      set_fact:
+        vm_ip: >-
+          {{
+            (vm_info.resources[0].status.interfaces
+            | selectattr('interfaceName','equalto','eth0')
+            | list)[0].ipAddress
+          }}
 
     - name: Fail if no IPv4 found
       fail:
-        msg: "❌ No IPv4 address found for VM {{ vm_name }} in namespace {{ vm_namespace }}"
-      when: vm_ipv4.stdout == ""
+        msg: "❌ No IPv4 address found for VM {{ vm_name }}. Guest agent may not be ready."
+      when: vm_ip is not defined or vm_ip == ''
+
+    - name: Display VM IP
+      debug:
+        msg: "✅ Found IPv4 for {{ vm_name }}: {{ vm_ip }}"
 
     - name: Add VM to dynamic inventory
       add_host:
         name: "{{ vm_name }}"
-        ansible_host: "{{ vm_ipv4.stdout }}"
+        ansible_host: "{{ vm_ip }}"
         ansible_user: root
-        ansible_password: "{{ rhsm_password }}"
+        ansible_password: "password"   # matches your cloud-init
         ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
         groups: vms
 
-- name: Register system and enable RHEL repositories on apache-vm
+- name: Register system and enable repositories on apache-vm
   hosts: vms
   gather_facts: yes
   become: true
@@ -77,7 +81,7 @@
         subscription-manager clean || true
       ignore_errors: true
 
-    - name: Register the system with Red Hat Subscription Manager
+    - name: Register the system with Red Hat Subscription Manager (retry)
       shell: |
         subscription-manager register \
           --username='{{ rhsm_username }}' \
