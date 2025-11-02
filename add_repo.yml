@@ -8,6 +8,7 @@
     vm_namespace: "vm-migration-test"
     rhsm_username: "info@pacetechsystems.com"
     rhsm_password: "Silverado@8787!!!!"
+    cloud_init_password: "password"  # VM root password from cloud-init
     rhel_version: 9
     repos_to_enable:
       - rhel-9-for-x86_64-baseos-rpms
@@ -17,45 +18,42 @@
     registration_delay: 10
 
   tasks:
-    - name: Get VM info from KubeVirt
+    - name: Get VMI info from KubeVirt
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
         kind: VirtualMachineInstance
         name: "{{ vm_name }}"
         namespace: "{{ vm_namespace }}"
-      register: vm_info
+      register: vmi_info
       retries: 10
       delay: 5
-      until: vm_info.resources | length > 0
+      until: (vmi_info.resources | length) > 0
 
     - name: Extract VM IPv4 address
       set_fact:
-        vm_ip: >-
-          {{
-            (vm_info.resources[0].status.interfaces
-            | selectattr('interfaceName','equalto','eth0')
-            | list)[0].ipAddress
-          }}
+        vm_ipv4: "{{ (vmi_info.resources[0].status.interfaces[0].ipAddresses | select('match','^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$') | list)[0] | default('') }}"
 
-    - name: Fail if no IPv4 found
+    - name: Fail if no IPv4 address found
       fail:
         msg: "❌ No IPv4 address found for VM {{ vm_name }}. Guest agent may not be ready."
-      when: vm_ip is not defined or vm_ip == ''
+      when: vm_ipv4 == ''
 
-    - name: Display VM IP
-      debug:
-        msg: "✅ Found IPv4 for {{ vm_name }}: {{ vm_ip }}"
+    - name: Test SSH connectivity to VM
+      wait_for:
+        host: "{{ vm_ipv4 }}"
+        port: 22
+        timeout: 30
 
     - name: Add VM to dynamic inventory
       add_host:
         name: "{{ vm_name }}"
-        ansible_host: "{{ vm_ip }}"
+        ansible_host: "{{ vm_ipv4 }}"
         ansible_user: root
-        ansible_password: "password"   # matches your cloud-init
+        ansible_password: "{{ cloud_init_password }}"
         ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
         groups: vms
 
-- name: Register system and enable repositories on apache-vm
+- name: Register VM and enable RHEL repositories
   hosts: vms
   gather_facts: yes
   become: true
@@ -65,8 +63,6 @@
       - rhel-9-for-x86_64-baseos-rpms
       - rhel-9-for-x86_64-appstream-rpms
       - codeready-builder-for-rhel-9-x86_64-rpms
-    registration_retries: 3
-    registration_delay: 10
 
   tasks:
     - name: Ensure subscription-manager is installed
@@ -74,7 +70,7 @@
         name: subscription-manager
         state: present
 
-    - name: Unregister any existing registration
+    - name: Unregister any existing registration (clean state)
       shell: |
         subscription-manager remove --all || true
         subscription-manager unregister || true
@@ -91,7 +87,7 @@
       retries: "{{ registration_retries }}"
       delay: "{{ registration_delay }}"
       until: register_result.rc == 0
-      no_log: true
+      no_log: false   # Show output for debugging
 
     - name: Wait for redhat.repo to appear
       wait_for:
