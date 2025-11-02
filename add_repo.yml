@@ -13,7 +13,7 @@
       - rhel-9-for-x86_64-baseos-rpms
       - rhel-9-for-x86_64-appstream-rpms
       - codeready-builder-for-rhel-9-x86_64-rpms
-    kubeconfig_path: "/home/hogege/kubeconfig"  # <-- set path to your kubeconfig here
+    kubeconfig_path: "/etc/kubernetes/static-pod-resources/kube-apiserver-certs/secrets/node-kubeconfigs/localhost.kubeconfig"  # <-- set path to your kubeconfig here
     registration_retries: 3
     registration_delay: 10
 
