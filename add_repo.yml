@@ -1,5 +1,5 @@
 ---
-- name: Add RHEL repositories to apache-vm
+- name: Register apache-vm and enable RHEL repositories
   hosts: localhost
   gather_facts: false
 
@@ -13,6 +13,8 @@
       - rhel-9-for-x86_64-baseos-rpms
       - rhel-9-for-x86_64-appstream-rpms
       - codeready-builder-for-rhel-9-x86_64-rpms
+    registration_retries: 3
+    registration_delay: 10
 
   tasks:
     - name: Get VM instance info from KubeVirt
@@ -29,18 +31,13 @@
     - name: Extract VM IP address
       set_fact:
         vm_ip: "{{ (vmi_info.resources[0].status.interfaces[0].ipAddress | default('')) }}"
-      when: (vmi_info.resources | default([])) | length > 0
 
     - name: Fail if VM IP could not be found
       fail:
         msg: "❌ No IP found for VM {{ vm_name }} in namespace {{ vm_namespace }}"
       when: vm_ip | length == 0
 
-    - name: Display discovered VM IP
-      debug:
-        msg: "✅ Found IP for {{ vm_name }}: {{ vm_ip }}"
-
-    - name: Add VM to inventory dynamically
+    - name: Add VM to dynamic inventory
       add_host:
         name: "{{ vm_name }}"
         ansible_host: "{{ vm_ip }}"
@@ -49,9 +46,7 @@
         ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
         groups: vms
 
----
-
-- name: Register system and add repositories on apache-vm
+- name: Register system and enable repositories on apache-vm
   hosts: vms
   gather_facts: yes
   become: true
@@ -61,6 +56,8 @@
       - rhel-9-for-x86_64-baseos-rpms
       - rhel-9-for-x86_64-appstream-rpms
       - codeready-builder-for-rhel-9-x86_64-rpms
+    registration_retries: 3
+    registration_delay: 10
 
   tasks:
     - name: Ensure subscription-manager is installed
@@ -68,33 +65,30 @@
         name: subscription-manager
         state: present
 
-    - name: Unregister if already registered (clean state)
+    - name: Unregister any existing registration
       shell: |
         subscription-manager remove --all || true
         subscription-manager unregister || true
         subscription-manager clean || true
       ignore_errors: true
 
-    - name: Register the system with Red Hat Subscription Manager
+    - name: Register the system with Red Hat Subscription Manager (retry)
       shell: |
         subscription-manager register \
           --username='{{ rhsm_username }}' \
           --password='{{ rhsm_password }}' \
           --auto-attach
       register: register_result
-      failed_when: register_result.rc != 0 or
-                   ('Error' in register_result.stdout or 'Error' in register_result.stderr)
+      retries: "{{ registration_retries }}"
+      delay: "{{ registration_delay }}"
+      until: register_result.rc == 0
       no_log: true
 
-    - name: Verify redhat.repo exists
-      stat:
+    - name: Wait for redhat.repo to appear
+      wait_for:
         path: /etc/yum.repos.d/redhat.repo
-      register: redhat_repo_file
-
-    - name: Fail if redhat.repo does not exist
-      fail:
-        msg: "❌ redhat.repo missing — registration likely failed"
-      when: not redhat_repo_file.stat.exists
+        state: present
+        timeout: 60
 
     - name: Disable all repos (clean start)
       shell: subscription-manager repos --disable="*"
