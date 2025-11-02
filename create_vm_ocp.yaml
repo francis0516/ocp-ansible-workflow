@@ -81,10 +81,14 @@
                     interfaces:
                       - name: default
                         bridge: {}
+                      - name: br-ex-net
+                        bridge: {}
                 networks:
                   - name: default
+                    pod: {}
+                  - name: br-ex-net
                     multus:
-                      networkName: "{{ network_attachment }}"
+                      networkName: "{{ vm_project }}/{{ network_attachment }}"
                 volumes:
                   - name: rootdisk
                     dataVolume:
@@ -95,6 +99,9 @@
                         version: 2
                         ethernets:
                           eth0:
+                            dhcp4: true
+                            dhcp6: false
+                          eth1:
                             dhcp4: true
                             dhcp6: false
                       userData: |
@@ -145,7 +152,6 @@
 
     - name: Poll VM for IPv4 address (guest agent or SSH fallback)
       block:
-
         - name: Poll VMI status for IPv4 (guest agent)
           kubernetes.core.k8s_info:
             api_version: kubevirt.io/v1
