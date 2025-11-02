@@ -1,5 +1,5 @@
 ---
-- name: Add RHEL repositories to apache-vm
+- name: Register apache-vm and enable RHEL repositories
   hosts: localhost
   gather_facts: false
 
@@ -13,8 +13,9 @@
       - rhel-9-for-x86_64-baseos-rpms
       - rhel-9-for-x86_64-appstream-rpms
       - codeready-builder-for-rhel-9-x86_64-rpms
-    max_ip_wait: 300   # Total seconds to wait for VM IPv4
+    max_ip_retries: 30
     ip_poll_interval: 10
+    ssh_timeout: 300
 
   tasks:
     - name: Get VM instance info from KubeVirt
@@ -28,7 +29,7 @@
       delay: 5
       until: (vmi_info.resources | default([])) | length > 0
 
-    - name: Wait for VM to report IPv4
+    - name: Extract VM IPv4 address
       set_fact:
         vm_ip: >-
           {{
@@ -39,20 +40,23 @@
             list |
             first | default('')
           }}
-      register: vm_ip_fact
-      until: vm_ip_fact.vm_ip != ''
-      retries: "{{ (max_ip_wait // ip_poll_interval) | int }}"
-      delay: "{{ ip_poll_interval }}"
-    
-    - name: Fail if VM IPv4 not found
+
+    - name: Fail if VM IPv4 could not be found
       fail:
-        msg: "❌ VM {{ vm_name }} has no IPv4 address yet. Guest agent may not be ready."
-      when: vm_ip_fact.vm_ip == ''
+        msg: "❌ No IPv4 address found for VM {{ vm_name }} in namespace {{ vm_namespace }}. Guest agent may not be ready."
+      when: vm_ip == ''
+
+    - name: Wait for SSH port 22 to be reachable on VM
+      wait_for:
+        host: "{{ vm_ip }}"
+        port: 22
+        timeout: "{{ ssh_timeout }}"
+        state: started
 
     - name: Add VM to dynamic inventory
       add_host:
         name: "{{ vm_name }}"
-        ansible_host: "{{ vm_ip_fact.vm_ip }}"
+        ansible_host: "{{ vm_ip }}"
         ansible_user: root
         ansible_password: "{{ rhsm_password }}"
         ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
@@ -68,8 +72,6 @@
       - rhel-9-for-x86_64-baseos-rpms
       - rhel-9-for-x86_64-appstream-rpms
       - codeready-builder-for-rhel-9-x86_64-rpms
-    registration_retries: 3
-    registration_delay: 10
 
   tasks:
     - name: Ensure subscription-manager is installed
@@ -84,15 +86,15 @@
         subscription-manager clean || true
       ignore_errors: true
 
-    - name: Register system with Red Hat Subscription Manager (retry)
+    - name: Register the system with Red Hat Subscription Manager
       shell: |
         subscription-manager register \
           --username='{{ rhsm_username }}' \
           --password='{{ rhsm_password }}' \
           --auto-attach
       register: register_result
-      retries: "{{ registration_retries }}"
-      delay: "{{ registration_delay }}"
+      retries: 3
+      delay: 10
       until: register_result.rc == 0
       no_log: true
 
