@@ -8,58 +8,47 @@
     vm_namespace: "vm-migration-test"
     rhsm_username: "info@pacetechsystems.com"
     rhsm_password: "Silverado@8787!!!!"
-    vm_password: "password"   # matches cloud-init password
     rhel_version: 9
     repos_to_enable:
       - rhel-9-for-x86_64-baseos-rpms
       - rhel-9-for-x86_64-appstream-rpms
       - codeready-builder-for-rhel-9-x86_64-rpms
+    registration_retries: 3
+    registration_delay: 10
     guest_ip_retries: 20
     guest_ip_delay: 15
 
   tasks:
-    - name: Get VM instance info from KubeVirt
-      kubernetes.core.k8s_info:
-        api_version: kubevirt.io/v1
-        kind: VirtualMachineInstance
-        name: "{{ vm_name }}"
-        namespace: "{{ vm_namespace }}"
-      register: vmi_info
-      retries: 10
-      delay: 5
-      until: (vmi_info.resources | default([])) | length > 0
 
-    - name: Wait for VM guest agent IPv4 to be available
-      set_fact:
-        vm_ip: >-
-          {{ vmi_info.resources[0].status.interfaces[0].ipAddresses
-             | select("match", "^\\d+\\.\\d+\\.\\d+\\.\\d+$")
-             | list
-             | first }}
+    - name: Wait for VM guest agent to report IPv4
+      command: >
+        oc get vmi {{ vm_name }} -n {{ vm_namespace }}
+        -o jsonpath='{.status.interfaces[0].ipAddresses[?(@ =~ "\d+\.\d+\.\d+\.\d+")]}'
+      register: vm_ip_result
       retries: "{{ guest_ip_retries }}"
       delay: "{{ guest_ip_delay }}"
-      until: vm_ip is defined and vm_ip != ''
+      until: vm_ip_result.stdout != ''
+      ignore_errors: false
+
+    - name: Set VM IPv4 fact
+      set_fact:
+        vm_ip: "{{ vm_ip_result.stdout }}"
 
     - name: Fail if no IPv4 found
       fail:
         msg: "❌ No IPv4 address found for VM {{ vm_name }}. Guest agent may not be ready."
-      when: vm_ip is not defined or vm_ip == ''
+      when: vm_ip == ''
 
-    - name: Add VM to dynamic in-memory inventory
+    - name: Add VM to dynamic inventory
       add_host:
         name: "{{ vm_name }}"
         ansible_host: "{{ vm_ip }}"
         ansible_user: root
-        ansible_password: "{{ vm_password }}"
+        ansible_password: password
         ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
         groups: vms
 
-    - name: Display added VM info
-      debug:
-        msg: "VM {{ vm_name }} ({{ vm_ip }}) added to dynamic group 'vms' for next tasks"
-
-# --- Second play: connect to VM and register repos ---
-- name: Register system and enable RHEL repositories
+- name: Register system and enable repositories on VM
   hosts: vms
   gather_facts: yes
   become: true
@@ -69,14 +58,17 @@
       - rhel-9-for-x86_64-baseos-rpms
       - rhel-9-for-x86_64-appstream-rpms
       - codeready-builder-for-rhel-9-x86_64-rpms
+    registration_retries: 3
+    registration_delay: 10
 
   tasks:
+
     - name: Ensure subscription-manager is installed
       package:
         name: subscription-manager
         state: present
 
-    - name: Unregister any existing registration (clean start)
+    - name: Unregister any existing registration
       shell: |
         subscription-manager remove --all || true
         subscription-manager unregister || true
@@ -90,7 +82,9 @@
           --password='{{ rhsm_password }}' \
           --auto-attach
       register: register_result
-      failed_when: register_result.rc != 0
+      retries: "{{ registration_retries }}"
+      delay: "{{ registration_delay }}"
+      until: register_result.rc == 0
       no_log: true
 
     - name: Wait for redhat.repo to appear
