@@ -16,7 +16,7 @@
     cloud_init_password: password
     network_attachment: br-ex-network
     ip_poll_interval: 10
-    max_ip_retries: 30
+    max_ip_retries: 10
 
   tasks:
     - name: Display VM configuration
