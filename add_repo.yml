@@ -1,5 +1,5 @@
 ---
-- name: Add RHEL repositories to a VM dynamically
+- name: Add RHEL repositories to a VM via guest agent IP
   hosts: localhost
   gather_facts: false
 
@@ -13,11 +13,9 @@
       - rhel-9-for-x86_64-baseos-rpms
       - rhel-9-for-x86_64-appstream-rpms
       - codeready-builder-for-rhel-9-x86_64-rpms
-    registration_retries: 3
-    registration_delay: 10
 
   tasks:
-    - name: Get VM instance info from KubeVirt
+    - name: Get VMI info from KubeVirt
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
         kind: VirtualMachineInstance
@@ -28,42 +26,30 @@
       delay: 5
       until: (vmi_info.resources | default([])) | length > 0
 
-    - name: Extract guest agent IPv4
+    - name: Extract VM IPv4 from guest agent
       set_fact:
-        vm_guest_ip: "{{ vmi_info.resources[0].status.interfaces[0].ipAddress | default('') }}"
+        vm_ip: >-
+          {{
+            (vmi_info.resources[0].status.interfaces[0].ipAddresses
+            | select("match","^\\d+\\.\\d+\\.\\d+\\.\\d+$")
+            | list)[0] | default("")
+          }}
 
-    - name: Get pod backing the VM
-      command: >
-        oc get pod -n {{ vm_namespace }} -l kubevirt.io/domain={{ vm_name }}
-        -o jsonpath='{.items[0].status.podIP}'
-      register: pod_ip_result
-      retries: 10
-      delay: 5
-      until: pod_ip_result.stdout != ""
-
-    - name: Determine VM IP (guest agent preferred)
-      set_fact:
-        vm_ip: "{{ vm_guest_ip if vm_guest_ip != '' else pod_ip_result.stdout }}"
-
-    - name: Fail if no IPv4 address found
+    - name: Fail if no IPv4 found
       fail:
-        msg: "❌ No IPv4 address found for VM {{ vm_name }}."
-      when: vm_ip == ''
-
-    - name: Display VM IP
-      debug:
-        msg: "✅ Using VM IP: {{ vm_ip }}"
+        msg: "❌ No IPv4 address found for VM {{ vm_name }}. Guest agent may not be ready."
+      when: vm_ip == ""
 
     - name: Add VM to dynamic inventory
       add_host:
         name: "{{ vm_name }}"
         ansible_host: "{{ vm_ip }}"
         ansible_user: root
-        ansible_password: password
+        ansible_password: "password"   # VM root password
         ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
         groups: vms
 
-- name: Register system and enable repositories
+- name: Register VM and enable RHEL repos
   hosts: vms
   gather_facts: yes
   become: true
@@ -74,39 +60,38 @@
         name: subscription-manager
         state: present
 
-    - name: Unregister existing registration
+    - name: Unregister any existing registration
       shell: |
         subscription-manager remove --all || true
         subscription-manager unregister || true
         subscription-manager clean || true
       ignore_errors: true
 
-    - name: Register the system with Red Hat Subscription Manager (retry)
+    - name: Register the system with Red Hat Subscription Manager
       shell: |
         subscription-manager register \
           --username='{{ rhsm_username }}' \
           --password='{{ rhsm_password }}' \
           --auto-attach
       register: register_result
-      retries: "{{ registration_retries }}"
-      delay: "{{ registration_delay }}"
-      until: register_result.rc == 0
       no_log: true
+      failed_when: register_result.rc != 0 and
+                   "'already registered' not in register_result.stderr | lower"
 
-    - name: Wait for redhat.repo
+    - name: Wait for redhat.repo to appear
       wait_for:
         path: /etc/yum.repos.d/redhat.repo
         state: present
         timeout: 60
 
-    - name: Disable all repos
+    - name: Disable all repos (clean start)
       shell: subscription-manager repos --disable="*"
 
-    - name: Enable required RHEL repos
+    - name: Enable required RHEL repositories
       shell: "subscription-manager repos --enable={{ item }}"
       loop: "{{ repos_to_enable }}"
 
-    - name: Install EPEL
+    - name: Install EPEL repository
       shell: |
         dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-{{ rhel_version }}.noarch.rpm
       args:
@@ -117,11 +102,11 @@
         dnf clean all
         dnf makecache
 
-    - name: Verify repo access
+    - name: Verify enabled repositories
       shell: dnf repolist enabled
       register: repolist
       changed_when: false
 
-    - name: Show final enabled repos
+    - name: Display final enabled repositories
       debug:
         msg: "{{ repolist.stdout_lines }}"
