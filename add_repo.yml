@@ -8,7 +8,6 @@
     vm_namespace: "vm-migration-test"
     rhsm_username: "info@pacetechsystems.com"
     rhsm_password: "Silverado@8787!!!!"
-    cloud_init_password: "password"  # VM root password from cloud-init
     rhel_version: 9
     repos_to_enable:
       - rhel-9-for-x86_64-baseos-rpms
@@ -18,7 +17,8 @@
     registration_delay: 10
 
   tasks:
-    - name: Get VMI info from KubeVirt
+
+    - name: Get VM instance info from KubeVirt
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
         kind: VirtualMachineInstance
@@ -29,31 +29,38 @@
       delay: 5
       until: (vmi_info.resources | length) > 0
 
-    - name: Extract VM IPv4 address
-      set_fact:
-        vm_ipv4: "{{ (vmi_info.resources[0].status.interfaces[0].ipAddresses | select('match','^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$') | list)[0] | default('') }}"
+    - name: Get Pod IP as fallback
+      command: oc get pod -n {{ vm_namespace }} -l kubevirt.io/domain={{ vm_name }} -o jsonpath='{.items[0].status.podIP}'
+      register: pod_ip
+      changed_when: false
 
-    - name: Fail if no IPv4 address found
+    - name: Extract VM IPv4 from guest agent or fallback to Pod IP
+      set_fact:
+        vm_ip: >-
+          {{ (vmi_info.resources[0].status.interfaces[0].ipAddresses 
+             | select('match','[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+') 
+             | list | first) 
+             | default(pod_ip.stdout) }}
+
+    - name: Fail if no IPv4 found
       fail:
         msg: "❌ No IPv4 address found for VM {{ vm_name }}. Guest agent may not be ready."
-      when: vm_ipv4 == ''
+      when: vm_ip is not defined or vm_ip == ""
 
-    - name: Test SSH connectivity to VM
-      wait_for:
-        host: "{{ vm_ipv4 }}"
-        port: 22
-        timeout: 30
+    - name: Display selected VM IPv4
+      debug:
+        msg: "✅ Using IPv4 {{ vm_ip }} for VM {{ vm_name }}"
 
     - name: Add VM to dynamic inventory
       add_host:
         name: "{{ vm_name }}"
-        ansible_host: "{{ vm_ipv4 }}"
+        ansible_host: "{{ vm_ip }}"
         ansible_user: root
-        ansible_password: "{{ cloud_init_password }}"
+        ansible_password: "password"
         ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
         groups: vms
 
-- name: Register VM and enable RHEL repositories
+- name: Register system and enable repositories on apache-vm
   hosts: vms
   gather_facts: yes
   become: true
@@ -63,14 +70,17 @@
       - rhel-9-for-x86_64-baseos-rpms
       - rhel-9-for-x86_64-appstream-rpms
       - codeready-builder-for-rhel-9-x86_64-rpms
+    registration_retries: 3
+    registration_delay: 10
 
   tasks:
+
     - name: Ensure subscription-manager is installed
       package:
         name: subscription-manager
         state: present
 
-    - name: Unregister any existing registration (clean state)
+    - name: Unregister any existing registration
       shell: |
         subscription-manager remove --all || true
         subscription-manager unregister || true
@@ -87,7 +97,7 @@
       retries: "{{ registration_retries }}"
       delay: "{{ registration_delay }}"
       until: register_result.rc == 0
-      no_log: false   # Show output for debugging
+      no_log: true
 
     - name: Wait for redhat.repo to appear
       wait_for:
