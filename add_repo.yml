@@ -17,28 +17,27 @@
     registration_delay: 10
 
   tasks:
-    - name: Get VM instance info from KubeVirt
-      kubernetes.core.k8s_info:
-        api_version: kubevirt.io/v1
-        kind: VirtualMachineInstance
-        name: "{{ vm_name }}"
-        namespace: "{{ vm_namespace }}"
-      register: vmi_info
+    - name: Get the pod backing the VM
+      command: >
+        oc get pod -n {{ vm_namespace }} -l kubevirt.io/domain={{ vm_name }}
+        -o jsonpath='{.items[0].metadata.name}'
+      register: vm_pod
       retries: 10
       delay: 5
-      until: (vmi_info.resources | default([])) | length > 0
+      until: vm_pod.stdout != ""
 
-    - name: Extract VM IPv4 address
+    - name: Get VM Pod IPv4 address
+      command: >
+        oc get pod {{ vm_pod.stdout }} -n {{ vm_namespace }}
+        -o jsonpath='{.status.podIP}'
+      register: vm_ip_cmd
+      retries: 10
+      delay: 5
+      until: vm_ip_cmd.stdout != ""
+
+    - name: Set VM IP fact
       set_fact:
-        vm_ip: >-
-          {{ (vmi_info.resources[0].status.interfaces[0].ipAddresses
-              | select('match', '^\\d+\\.\\d+\\.\\d+\\.\\d+$')
-              | list)[0] | default('') }}
-
-    - name: Fail if VM IPv4 could not be found
-      fail:
-        msg: "❌ No IPv4 address found for VM {{ vm_name }} in namespace {{ vm_namespace }}. Guest agent may not be ready."
-      when: vm_ip == ''
+        vm_ip: "{{ vm_ip_cmd.stdout }}"
 
     - name: Display discovered VM IP
       debug:
@@ -79,7 +78,7 @@
         subscription-manager clean || true
       ignore_errors: true
 
-    - name: Register the system with Red Hat Subscription Manager (retry)
+    - name: Register the system with Red Hat Subscription Manager
       shell: |
         subscription-manager register \
           --username='{{ rhsm_username }}' \
