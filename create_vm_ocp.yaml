@@ -142,7 +142,7 @@
       until:
         - vmi_info.resources | length > 0
         - vmi_info.resources[0].status.phase == "Running"
-      retries: 20
+      retries: 30
       delay: 10
 
     - name: Initialize IPv4 facts
@@ -150,9 +150,9 @@
         vm_ipv4_addresses: []
         vm_ip: "No IPv4 assigned"
 
-    - name: Poll VM for IPv4 address (guest agent or SSH fallback)
+    - name: Poll VM for IPv4 address on br-ex network (guest agent or SSH fallback)
       block:
-        - name: Poll VMI status for IPv4 (guest agent)
+        - name: Poll VMI status for IPv4 on br-ex interface
           kubernetes.core.k8s_info:
             api_version: kubevirt.io/v1
             kind: VirtualMachineInstance
@@ -163,6 +163,7 @@
           until: >-
             (vmi_network_info.resources | length > 0) and
             ((vmi_network_info.resources[0].status.interfaces | default([]) |
+            selectattr('name', 'equalto', 'br-ex-net') |
             map(attribute='ipAddresses') |
             select('defined') |
             map('flatten') |
@@ -173,59 +174,28 @@
           delay: "{{ ip_poll_interval }}"
           ignore_errors: true
 
-        - name: Extract IPv4 from guest agent
+        - name: Extract IPv4 from guest agent (br-ex-net)
           when: vmi_network_info.resources | length > 0
           set_fact:
             vm_ipv4_addresses: >-
               {{
-                (vmi_network_info.resources[0].status.interfaces | default([])) |
+                (vmi_network_info.resources[0].status.interfaces | default([]) |
+                selectattr('name', 'equalto', 'br-ex-net') |
                 map(attribute='ipAddresses') |
                 select('defined') |
                 map('flatten') |
                 flatten |
                 select('match', '^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$') |
                 list
+                )
               }}
             vm_ip: "{{ vm_ipv4_addresses[0] if vm_ipv4_addresses | length > 0 else 'No IPv4 assigned' }}"
-
-        - name: Debug detected guest agent IPs
-          debug:
-            msg:
-              - "Detected IPv4 addresses via guest agent: {{ vm_ipv4_addresses | join(', ') }}"
-              - "Selected primary IP: {{ vm_ip }}"
-
-        - name: Fallback Extract IPv4 via SSH if guest agent failed
-          when: vm_ip == 'No IPv4 assigned'
-          block:
-            - name: Wait for SSH to be available
-              wait_for:
-                host: "{{ (vmi_network_info.resources[0].status.interfaces[0].ipAddresses[0] | default('127.0.0.1')) }}"
-                port: 22
-                timeout: 120
-                delay: 10
-              ignore_errors: true
-
-            - name: Extract IPv4 via SSH
-              shell: |
-                sshpass -p '{{ cloud_init_password }}' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-                root@{{ (vmi_network_info.resources[0].status.interfaces[0].ipAddresses[0] | default('127.0.0.1')) }} \
-                "ip -4 addr show eth0 | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){3}' | head -1"
-              register: vm_internal_ip
-              ignore_errors: true
-              changed_when: false
-
-            - name: Set IPv4 from SSH fallback
-              when: vm_internal_ip.rc == 0 and vm_internal_ip.stdout | length > 0
-              set_fact:
-                vm_ip: "{{ vm_internal_ip.stdout | trim }}"
-                vm_ipv4_addresses: [ "{{ vm_internal_ip.stdout | trim }}" ]
 
         - name: Fail if IPv4 still missing
           when: vm_ip == '' or vm_ip == 'No IPv4 assigned'
           fail:
             msg: >
-              ERROR: No IPv4 address obtained for {{ vm_name }}.
-              Guest agent and SSH fallback both failed.
+              ERROR: No IPv4 address obtained for {{ vm_name }} on br-ex network.
 
     - name: Check guest agent status
       set_fact:
@@ -242,8 +212,8 @@
           - "======================================"
           - "VM Deployment Complete Successfully!"
           - "VM Name: {{ vm_name }}"
-          - "IPv4 Address: {{ vm_ip }}"
-          - "All IPv4 Addresses: {{ vm_ipv4_addresses | join(', ') }}"
+          - "IPv4 Address (br-ex): {{ vm_ip }}"
+          - "All IPv4 Addresses (br-ex): {{ vm_ipv4_addresses | join(', ') }}"
           - "Username: root"
           - "Password: {{ cloud_init_password }}"
           - "Network: {{ network_attachment }}"
