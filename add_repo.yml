@@ -1,5 +1,5 @@
 ---
-- name: Add RHEL repositories to apache-vm
+- name: Register apache-vm and enable RHEL repositories
   hosts: localhost
   gather_facts: false
 
@@ -13,6 +13,8 @@
       - rhel-9-for-x86_64-baseos-rpms
       - rhel-9-for-x86_64-appstream-rpms
       - codeready-builder-for-rhel-9-x86_64-rpms
+    registration_retries: 3
+    registration_delay: 10
 
   tasks:
     - name: Get VM instance info from KubeVirt
@@ -26,26 +28,21 @@
       delay: 5
       until: (vmi_info.resources | default([])) | length > 0
 
-    - name: Extract VM IP address (IPv4 preferred, fallback to IPv6)
+    - name: Extract VM IPv4 address
       set_fact:
         vm_ip: >-
-          {{
-            (
-              vmi_info.resources[0].status.interfaces[0].ipAddress 
-              if vmi_info.resources[0].status.interfaces[0].ipAddress is defined
-              else
-              (vmi_info.resources[0].status.interfaces[0].ipAddresses[0] | default(''))
-            )
-          }}
+          {{ (vmi_info.resources[0].status.interfaces[0].ipAddresses
+              | select('match', '^\\d+\\.\\d+\\.\\d+\\.\\d+$')
+              | list)[0] | default('') }}
 
-    - name: Fail if no IP found
+    - name: Fail if VM IPv4 could not be found
       fail:
-        msg: "❌ No IP found for VM {{ vm_name }} in namespace {{ vm_namespace }}. Guest agent may not be ready."
-      when: vm_ip == ""
+        msg: "❌ No IPv4 address found for VM {{ vm_name }} in namespace {{ vm_namespace }}. Guest agent may not be ready."
+      when: vm_ip == ''
 
     - name: Display discovered VM IP
       debug:
-        msg: "✅ Using IP {{ vm_ip }} for VM {{ vm_name }}"
+        msg: "✅ Found IPv4 for {{ vm_name }}: {{ vm_ip }}"
 
     - name: Add VM to dynamic inventory
       add_host:
@@ -53,10 +50,7 @@
         ansible_host: "{{ vm_ip }}"
         ansible_user: root
         ansible_password: "{{ rhsm_password }}"
-        ansible_ssh_common_args: >-
-          -o StrictHostKeyChecking=no
-          -o UserKnownHostsFile=/dev/null
-          {% if ':' in vm_ip %}-o AddressFamily=inet6{% endif %}
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
         groups: vms
 
 - name: Register system and enable repositories on apache-vm
@@ -69,6 +63,8 @@
       - rhel-9-for-x86_64-baseos-rpms
       - rhel-9-for-x86_64-appstream-rpms
       - codeready-builder-for-rhel-9-x86_64-rpms
+    registration_retries: 3
+    registration_delay: 10
 
   tasks:
     - name: Ensure subscription-manager is installed
@@ -83,15 +79,15 @@
         subscription-manager clean || true
       ignore_errors: true
 
-    - name: Register the system with Red Hat Subscription Manager
+    - name: Register the system with Red Hat Subscription Manager (retry)
       shell: |
         subscription-manager register \
           --username='{{ rhsm_username }}' \
           --password='{{ rhsm_password }}' \
           --auto-attach
       register: register_result
-      retries: 3
-      delay: 10
+      retries: "{{ registration_retries }}"
+      delay: "{{ registration_delay }}"
       until: register_result.rc == 0
       no_log: true
 
