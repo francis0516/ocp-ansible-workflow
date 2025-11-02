@@ -45,27 +45,24 @@
         name: "{{ vm_name }}"
         ansible_host: "{{ vm_ip }}"
         ansible_user: root
+        ansible_password: "{{ rhsm_password }}"
         ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+        groups: vms
+
+---
 
 - name: Register system and add repositories on apache-vm
-  hosts: apache-vm
+  hosts: vms
   gather_facts: yes
   become: true
 
   vars:
-    rhsm_username: "info@pacetechsystems.com"
-    rhsm_password: "Silverado@8787!!!!"
-    rhel_version: 9
     repos_to_enable:
       - rhel-9-for-x86_64-baseos-rpms
       - rhel-9-for-x86_64-appstream-rpms
       - codeready-builder-for-rhel-9-x86_64-rpms
 
   tasks:
-    - name: Display VM connection info
-      debug:
-        msg: "Connecting to VM at {{ ansible_host }}"
-
     - name: Ensure subscription-manager is installed
       package:
         name: subscription-manager
@@ -85,34 +82,26 @@
           --password='{{ rhsm_password }}' \
           --auto-attach
       register: register_result
-      changed_when: "'The system has been registered' in register_result.stdout or 'Auto-attach' in register_result.stdout"
-      failed_when:
-        - register_result.rc != 0
-        - "'already registered' not in register_result.stderr | lower"
+      failed_when: register_result.rc != 0 or
+                   ('Error' in register_result.stdout or 'Error' in register_result.stderr)
       no_log: true
 
-    - name: Display registration result
-      debug:
-        msg: "{{ register_result.stdout_lines | default(['Registration completed or already registered']) }}"
+    - name: Verify redhat.repo exists
+      stat:
+        path: /etc/yum.repos.d/redhat.repo
+      register: redhat_repo_file
+
+    - name: Fail if redhat.repo does not exist
+      fail:
+        msg: "❌ redhat.repo missing — registration likely failed"
+      when: not redhat_repo_file.stat.exists
 
     - name: Disable all repos (clean start)
       shell: subscription-manager repos --disable="*"
-      ignore_errors: true
 
     - name: Enable required RHEL repositories
       shell: "subscription-manager repos --enable={{ item }}"
       loop: "{{ repos_to_enable }}"
-      register: enable_repo_result
-      changed_when: "'enabled' in enable_repo_result.stdout"
-      ignore_errors: true
-
-    - name: Display enabled repositories
-      shell: subscription-manager repos --list-enabled
-      register: enabled_repos
-
-    - name: Show enabled repository summary
-      debug:
-        msg: "{{ enabled_repos.stdout_lines | select('match', '^Repo ID:') | list }}"
 
     - name: Install EPEL repository
       shell: |
