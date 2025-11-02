@@ -1,5 +1,5 @@
 ---
-- name: Register apache-vm and enable RHEL repositories
+- name: Add RHEL repositories to apache-vm
   hosts: localhost
   gather_facts: false
 
@@ -13,46 +13,45 @@
       - rhel-9-for-x86_64-baseos-rpms
       - rhel-9-for-x86_64-appstream-rpms
       - codeready-builder-for-rhel-9-x86_64-rpms
+    kubeconfig_path: "/home/hogege/kubeconfig"  # <-- set path to your kubeconfig here
     registration_retries: 3
     registration_delay: 10
 
   tasks:
     - name: Get the pod backing the VM
       command: >
-        oc get pod -n {{ vm_namespace }} -l kubevirt.io/domain={{ vm_name }}
+        oc --kubeconfig {{ kubeconfig_path }} get pod -n {{ vm_namespace }}
+        -l kubevirt.io/domain={{ vm_name }}
         -o jsonpath='{.items[0].metadata.name}'
       register: vm_pod
       retries: 10
       delay: 5
       until: vm_pod.stdout != ""
 
-    - name: Get VM Pod IPv4 address
+    - name: Get the IPv4 address of the VM
       command: >
-        oc get pod {{ vm_pod.stdout }} -n {{ vm_namespace }}
-        -o jsonpath='{.status.podIP}'
-      register: vm_ip_cmd
+        oc --kubeconfig {{ kubeconfig_path }} exec -n {{ vm_namespace }} {{ vm_pod.stdout }}
+        -- ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}'
+      register: vm_ipv4
       retries: 10
       delay: 5
-      until: vm_ip_cmd.stdout != ""
+      until: vm_ipv4.stdout != ""
 
-    - name: Set VM IP fact
-      set_fact:
-        vm_ip: "{{ vm_ip_cmd.stdout }}"
-
-    - name: Display discovered VM IP
-      debug:
-        msg: "✅ Found IPv4 for {{ vm_name }}: {{ vm_ip }}"
+    - name: Fail if no IPv4 found
+      fail:
+        msg: "❌ No IPv4 address found for VM {{ vm_name }} in namespace {{ vm_namespace }}"
+      when: vm_ipv4.stdout == ""
 
     - name: Add VM to dynamic inventory
       add_host:
         name: "{{ vm_name }}"
-        ansible_host: "{{ vm_ip }}"
+        ansible_host: "{{ vm_ipv4.stdout }}"
         ansible_user: root
         ansible_password: "{{ rhsm_password }}"
         ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
         groups: vms
 
-- name: Register system and enable repositories on apache-vm
+- name: Register system and enable RHEL repositories on apache-vm
   hosts: vms
   gather_facts: yes
   become: true
