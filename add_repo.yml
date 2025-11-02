@@ -15,8 +15,11 @@
       - codeready-builder-for-rhel-9-x86_64-rpms
     registration_retries: 3
     registration_delay: 10
+    ssh_wait_timeout: 300
+    ssh_poll_interval: 10
 
   tasks:
+
     - name: Get VM instance info from KubeVirt
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
@@ -28,22 +31,35 @@
       delay: 5
       until: (vmi_info.resources | default([])) | length > 0
 
-    - name: Extract VM IP address
+    - name: Extract VM IPv4 address
       set_fact:
-        vm_ip: "{{ (vmi_info.resources[0].status.interfaces[0].ipAddress | default('')) }}"
+        vm_ip: >-
+          {{
+            (vmi_info.resources[0].status.interfaces | default([])) |
+            map(attribute='ipAddresses') | flatten |
+            select('match', '^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$') | list | first
+          }}
 
-    - name: Fail if VM IP could not be found
+    - name: Fail if no IPv4 found
       fail:
-        msg: "❌ No IP found for VM {{ vm_name }} in namespace {{ vm_namespace }}"
-      when: vm_ip | length == 0
+        msg: "❌ No IPv4 address found for VM {{ vm_name }}"
+      when: vm_ip is not defined
 
-    - name: Add VM to dynamic inventory
+    - name: Wait for SSH to be available on VM IPv4
+      wait_for:
+        host: "{{ vm_ip }}"
+        port: 22
+        timeout: "{{ ssh_wait_timeout }}"
+        delay: "{{ ssh_poll_interval }}"
+        state: started
+
+    - name: Add VM to dynamic inventory (IPv4 only)
       add_host:
         name: "{{ vm_name }}"
         ansible_host: "{{ vm_ip }}"
         ansible_user: root
         ansible_password: "{{ rhsm_password }}"
-        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+        ansible_ssh_common_args: "-o AddressFamily=inet -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
         groups: vms
 
 - name: Register system and enable repositories on apache-vm
@@ -60,6 +76,7 @@
     registration_delay: 10
 
   tasks:
+
     - name: Ensure subscription-manager is installed
       package:
         name: subscription-manager
@@ -72,7 +89,7 @@
         subscription-manager clean || true
       ignore_errors: true
 
-    - name: Register the system with Red Hat Subscription Manager (retry)
+    - name: Register the system with Red Hat Subscription Manager
       shell: |
         subscription-manager register \
           --username='{{ rhsm_username }}' \
