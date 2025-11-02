@@ -3,11 +3,17 @@
   gather_facts: false
 
   vars:
-    # Default VM variables in case they are not passed
-    vm_name: "{{ vm_name | default('apache-vm') }}"
-    vm_namespace: "{{ vm_namespace | default('vm-migration-test') }}"
+    # ✅ Define clean defaults without self-reference
+    default_vm_name: "apache-vm"
+    default_vm_namespace: "vm-migration-test"
 
   tasks:
+
+    # ✅ Set VM name and namespace safely (avoids recursion)
+    - name: Set effective VM name and namespace
+      set_fact:
+        vm_name: "{{ vm_name | default(default_vm_name) }}"
+        vm_namespace: "{{ vm_namespace | default(default_vm_namespace) }}"
 
     - name: Get VM information
       kubernetes.core.k8s_info:
@@ -62,7 +68,7 @@
         msg: "Service Endpoints: {{ (service_endpoints.resources | default([{}]))[0].subsets | default([]) }}"
       when:
         - (service_endpoints.resources | default([])) | length > 0
-        - (service_endpoints.resources[0].subsets is defined) 
+        - (service_endpoints.resources[0].subsets is defined)
         - (service_endpoints.resources[0].subsets | length > 0)
 
     - name: Display warning if no endpoints found
@@ -119,7 +125,7 @@
       debug:
         msg:
           - "==========================================================================="
-          - "Henogez WebServer Route Created Successfully!"
+          - "✅ Henogez WebServer Route Created Successfully!"
           - "==========================================================================="
           - "   Access your web server at:"
           - "   External URL (HTTPS): https://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
