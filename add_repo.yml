@@ -17,8 +17,7 @@
     registration_delay: 10
 
   tasks:
-
-    - name: Get VM instance info from KubeVirt
+    - name: Get VMI info from KubeVirt
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
         kind: VirtualMachineInstance
@@ -29,34 +28,28 @@
       delay: 5
       until: (vmi_info.resources | length) > 0
 
-    - name: Get Pod IP as fallback
-      command: oc get pod -n {{ vm_namespace }} -l kubevirt.io/domain={{ vm_name }} -o jsonpath='{.items[0].status.podIP}'
-      register: pod_ip
-      changed_when: false
-
-    - name: Extract VM IPv4 from guest agent or fallback to Pod IP
+    - name: Extract VM IPv4 from guest agent
       set_fact:
         vm_ip: >-
-          {{ (vmi_info.resources[0].status.interfaces[0].ipAddresses 
-             | select('match','[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+') 
-             | list | first) 
-             | default(pod_ip.stdout) }}
+          {{ (vmi_info.resources[0].status.interfaces[0].ipAddresses
+             | select('match','^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$')
+             | list | first) }}
 
     - name: Fail if no IPv4 found
       fail:
         msg: "❌ No IPv4 address found for VM {{ vm_name }}. Guest agent may not be ready."
-      when: vm_ip is not defined or vm_ip == ""
+      when: vm_ip is not defined
 
-    - name: Display selected VM IPv4
+    - name: Display discovered VM IPv4
       debug:
-        msg: "✅ Using IPv4 {{ vm_ip }} for VM {{ vm_name }}"
+        msg: "✅ Found IPv4 for {{ vm_name }}: {{ vm_ip }}"
 
     - name: Add VM to dynamic inventory
       add_host:
         name: "{{ vm_name }}"
         ansible_host: "{{ vm_ip }}"
         ansible_user: root
-        ansible_password: "password"
+        ansible_password: "{{ rhsm_password }}"
         ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
         groups: vms
 
@@ -74,7 +67,6 @@
     registration_delay: 10
 
   tasks:
-
     - name: Ensure subscription-manager is installed
       package:
         name: subscription-manager
