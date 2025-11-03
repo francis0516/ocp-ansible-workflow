@@ -1,12 +1,14 @@
 ---
-- name: Register VM and enable RHEL repositories
+- name: Configure network, register VM, and enable RHEL repositories
   hosts: localhost
   gather_facts: false
 
   vars:
     vm_name: "apache-vm"
     vm_namespace: "vm-migration-test"
-    vm_ip: "10.0.0.118"
+    vm_ip: "10.0.0.118"         # Static IP for your VM
+    vm_gateway: "10.0.0.1"       # Adjust to match your network
+    vm_dns: "8.8.8.8"            # Google DNS
     rhsm_username: "info@pacetechsystems.com"
     rhsm_password: "Silverado@8787!!!!"
     rhel_version: 9
@@ -25,124 +27,109 @@
         ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
         groups: vms
 
-# =======================================================================
-# SECOND PLAY - Network, DNS, Registration
-# =======================================================================
-- name: Configure static IP, DNS, and register to Red Hat
+    - name: Display added VM info
+      debug:
+        msg: "VM {{ vm_name }} ({{ vm_ip }}) added to dynamic group 'vms'"
+
+# ---------------------------------------------------------------------------
+
+- name: Configure network and register RHEL system
   hosts: vms
-  gather_facts: yes
   become: true
+  gather_facts: true
 
   vars:
-    static_ip: "10.0.0.118/24"
-    gateway: "10.0.0.1"
-    dns_servers: "8.8.8.8 8.8.4.4"
+    repos_to_enable:
+      - rhel-9-for-x86_64-baseos-rpms
+      - rhel-9-for-x86_64-appstream-rpms
+      - codeready-builder-for-rhel-9-x86_64-rpms
     registration_retries: 3
     registration_delay: 10
+    vm_ip: "10.0.0.118"
+    vm_gateway: "10.0.0.1"
+    vm_dns: "8.8.8.8"
 
   tasks:
 
-    # --- Ensure NetworkManager running ---
-    - name: Ensure NetworkManager is installed and running
+    - name: Ensure NetworkManager is installed
       package:
         name: NetworkManager
         state: present
 
-    - name: Start and enable NetworkManager
-      systemd:
-        name: NetworkManager
+    - name: Configure static network with Google DNS
+      community.general.nmcli:
+        conn_name: eth0
+        ifname: eth0
+        type: ethernet
+        ip4: "{{ vm_ip }}/24"
+        gw4: "{{ vm_gateway }}"
+        dns4: "{{ vm_dns }}"
+        state: present
+
+    - name: Bring up the eth0 connection
+      command: nmcli con up eth0
+
+    - name: Wait for internet connectivity
+      wait_for:
+        host: google.com
+        port: 80
+        timeout: 30
         state: started
-        enabled: yes
 
-    # --- Configure static IP, gateway, and DNS ---
-    - name: Configure static IP and DNS on eth0
-      shell: |
-        nmcli con show eth0 >/dev/null 2>&1 || nmcli con add type ethernet ifname eth0 con-name eth0
-        nmcli con mod eth0 ipv4.addresses {{ static_ip }}
-        nmcli con mod eth0 ipv4.gateway {{ gateway }}
-        nmcli con mod eth0 ipv4.method manual
-        nmcli con mod eth0 ipv4.dns "{{ dns_servers }}"
-        nmcli con mod eth0 ipv4.ignore-auto-dns yes
-        nmcli con up eth0
-      register: nmcli_output
-
-    - name: Display network configuration summary
-      debug:
-        msg: "{{ nmcli_output.stdout_lines | default([]) }}"
-
-    # --- Validate connectivity ---
-    - name: Wait for network link
-      shell: ping -c 2 8.8.8.8
-      register: ping_test
-      retries: 5
-      delay: 5
-      until: ping_test.rc == 0
-
-    - name: Test DNS resolution to google.com
-      shell: ping -c 2 google.com
-      register: dns_test
-      retries: 3
-      delay: 5
-      until: dns_test.rc == 0
+    - name: Test DNS resolution
+      command: ping -c 2 google.com
+      register: ping_result
+      ignore_errors: true
 
     - name: Display DNS test result
       debug:
-        msg: "✅ DNS working fine: {{ dns_test.stdout_lines | default([]) }}"
+        var: ping_result
 
-    # --- Register to Red Hat ---
+# ---------------------------------------------------------------------------
+
     - name: Ensure subscription-manager is installed
       package:
         name: subscription-manager
         state: present
 
-    - name: Unregister existing system
+    - name: Clean old registration if any
       shell: |
         subscription-manager remove --all || true
         subscription-manager unregister || true
         subscription-manager clean || true
       ignore_errors: true
 
-    - name: Register with Red Hat
-      shell: |
-        subscription-manager register \
-          --username='{{ rhsm_username }}' \
-          --password='{{ rhsm_password }}' \
-          --auto-attach
-      register: register_result
+    - name: Register the system with Red Hat Subscription Manager
+      community.general.redhat_subscription:
+        state: present
+        username: "{{ rhsm_username }}"
+        password: "{{ rhsm_password }}"
+        auto_attach: true
+      register: rhsm_result
       retries: "{{ registration_retries }}"
       delay: "{{ registration_delay }}"
-      until: register_result.rc == 0
-      no_log: true
+      until: rhsm_result is succeeded
 
-    - name: Wait for redhat.repo to appear
-      wait_for:
-        path: /etc/yum.repos.d/redhat.repo
-        state: present
-        timeout: 60
-
-    - name: Disable all repos
-      shell: subscription-manager repos --disable="*"
+    - name: Disable all repos (clean start)
+      command: subscription-manager repos --disable="*"
 
     - name: Enable required RHEL repositories
-      shell: "subscription-manager repos --enable={{ item }}"
+      command: subscription-manager repos --enable="{{ item }}"
       loop: "{{ repos_to_enable }}"
 
     - name: Install EPEL repository
-      shell: |
-        dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-{{ rhel_version }}.noarch.rpm
-      args:
-        creates: /etc/yum.repos.d/epel.repo
+      dnf:
+        name: "https://dl.fedoraproject.org/pub/epel/epel-release-latest-{{ rhel_version }}.noarch.rpm"
+        state: present
 
-    - name: Clean and refresh repository metadata
-      shell: |
-        dnf clean all
-        dnf makecache
+    - name: Clean and refresh metadata
+      command: dnf makecache
 
-    - name: Verify repository access
-      shell: dnf repolist enabled
-      register: repolist
+    - name: Verify enabled repositories
+      command: dnf repolist enabled
+      register: repo_list
       changed_when: false
 
-    - name: Display final enabled repositories
+    - name: Show final repo list
       debug:
-        msg: "{{ repolist.stdout_lines }}"
+        msg: "{{ repo_list.stdout_lines }}"
