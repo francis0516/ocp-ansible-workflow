@@ -102,7 +102,7 @@
       retries: "{{ registration_retries }}"
       delay: "{{ registration_delay }}"
       until: register_result.rc == 0
-      no_log: true
+      no_log: false
 
     - name: Disable all repos (clean start)
       command: subscription-manager repos --disable="*"
