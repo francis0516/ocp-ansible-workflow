@@ -5,7 +5,7 @@
   vars:
     vm_name: apache-vm
     vm_gateway: "10.0.0.1"
-    vm_dns: "8.8.8.8, 10.0.0.17"
+    vm_dns: "10.0.0.17,8.8.8.8"
     rhsm_username: "info@pacetechsystems.com"
     rhsm_password: "Silverado@8787!!!!"
     rhel_version: 9
@@ -58,18 +58,14 @@
         primary_iface: "{{ nmcli_devices.stdout_lines | select('search', 'connected') | map('split', ':') | map('first') | list | first | default('eth0') }}"
 
     - name: Configure persistent static network for primary interface
-      community.general.nmcli:
-        conn_name: "{{ primary_iface }}"
-        ifname: "{{ primary_iface }}"
-        type: ethernet
-        ip4: "{{ ansible_host }}/24"
-        gw4: "{{ vm_gateway }}"
-        dns4: "{{ vm_dns }}"
-        state: present
-        autoconnect: yes
-
-    - name: Bring up the primary interface
-      command: nmcli con up "{{ primary_iface }}"
+      shell: |
+        nmcli con delete "{{ primary_iface }}" || true
+        nmcli con add type ethernet ifname "{{ primary_iface }}" con-name "{{ primary_iface }}" \
+          ipv4.addresses {{ ansible_host }}/24 \
+          ipv4.gateway {{ vm_gateway }} \
+          ipv4.dns {{ vm_dns }} \
+          ipv4.method manual autoconnect yes
+        nmcli con up "{{ primary_iface }}"
 
     - name: Wait a few seconds for network to stabilize
       wait_for:
