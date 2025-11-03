@@ -1,21 +1,11 @@
 ---
-- name: Configure network, register VM, and enable RHEL repositories
+- name: Add VM to dynamic inventory
   hosts: localhost
   gather_facts: false
 
   vars:
     vm_name: "apache-vm"
-    vm_namespace: "vm-migration-test"
     vm_ip: "10.0.0.118"
-    vm_gateway: "10.0.0.1"
-    vm_dns: "8.8.8.8"
-    rhsm_username: "info@pacetechsystems.com"
-    rhsm_password: "Silverado@8787!!!!"
-    rhel_version: 9
-    repos_to_enable:
-      - rhel-9-for-x86_64-baseos-rpms
-      - rhel-9-for-x86_64-appstream-rpms
-      - codeready-builder-for-rhel-9-x86_64-rpms
 
   tasks:
     - name: Add VM to dynamic inventory
@@ -33,7 +23,7 @@
 
 # ---------------------------------------------------------------------------
 
-- name: Configure static network and register RHEL system
+- name: Configure network and register RHEL system
   hosts: vms
   become: true
   gather_facts: true
@@ -44,45 +34,38 @@
     vm_dns: "8.8.8.8"
     registration_retries: 3
     registration_delay: 10
+    rhsm_username: "info@pacetechsystems.com"
+    rhsm_password: "Silverado@8787!!!!"
+    rhel_version: 9
     repos_to_enable:
       - rhel-9-for-x86_64-baseos-rpms
       - rhel-9-for-x86_64-appstream-rpms
       - codeready-builder-for-rhel-9-x86_64-rpms
 
   tasks:
-    - name: Ensure NetworkManager is installed and running
+    - name: Ensure NetworkManager is installed
       package:
         name: NetworkManager
         state: present
 
-    - name: Ensure NetworkManager service is started and enabled
-      service:
-        name: NetworkManager
-        state: started
-        enabled: true
-
     - name: Configure static network for eth0
       shell: |
         nmcli con delete eth0 || true
-        nmcli con add type ethernet ifname eth0 con-name eth0 ipv4.addresses {{ vm_ip }}/24 ipv4.gateway {{ vm_gateway }} ipv4.dns {{ vm_dns }} ipv4.method manual autoconnect yes
+        nmcli con add type ethernet ifname eth0 con-name eth0 \
+          ipv4.addresses {{ vm_ip }}/24 \
+          ipv4.gateway {{ vm_gateway }} \
+          ipv4.dns {{ vm_dns }} \
+          ipv4.method manual \
+          autoconnect yes
         nmcli con up eth0
       args:
-        executable: /bin/bash
-
-    - name: Verify network configuration
-      command: nmcli device show eth0
-      register: nmcli_show
-      changed_when: false
-
-    - name: Display network configuration
-      debug:
-        var: nmcli_show.stdout_lines
+        warn: false
 
     - name: Wait for internet connectivity
       wait_for:
-        host: 8.8.8.8
-        port: 53
-        timeout: 40
+        host: google.com
+        port: 80
+        timeout: 30
         state: started
 
     - name: Test DNS resolution
@@ -101,7 +84,7 @@
         name: subscription-manager
         state: present
 
-    - name: Clean old registration if any
+    - name: Clean old RHSM registration if any
       shell: |
         subscription-manager remove --all || true
         subscription-manager unregister || true
@@ -111,8 +94,8 @@
     - name: Register the system with Red Hat Subscription Manager
       shell: |
         subscription-manager register \
-          --username="{{ rhsm_username }}" \
-          --password="{{ rhsm_password }}" \
+          --username='{{ rhsm_username }}' \
+          --password='{{ rhsm_password }}' \
           --auto-attach
       register: register_result
       retries: "{{ registration_retries }}"
@@ -133,7 +116,7 @@
       args:
         creates: /etc/yum.repos.d/epel.repo
 
-    - name: Clean and refresh metadata
+    - name: Clean and refresh repo metadata
       command: dnf makecache
 
     - name: Verify enabled repositories
@@ -141,6 +124,6 @@
       register: repo_list
       changed_when: false
 
-    - name: Show final repo list
+    - name: Display final repo list
       debug:
         msg: "{{ repo_list.stdout_lines }}"
