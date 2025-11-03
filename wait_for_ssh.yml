@@ -57,3 +57,9 @@
         msg:
           - "✅ VM IPv4 detected: {{ vm_ip }}"
           - "✅ SSH port 22 is reachable on {{ vm_ip }}"
+
+    # ✅ NEW TASK: Export vm_ip for use in the next workflow playbook
+    - name: Store VM IPv4 for next playbooks in workflow
+      ansible.builtin.set_stats:
+        data:
+          vm_ip: "{{ vm_ip }}"
