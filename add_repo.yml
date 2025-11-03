@@ -26,6 +26,12 @@
         ansible_password: password
         ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
         groups: vms
+        # Pass network & RHSM variables to the host
+        vm_ip: "{{ vm_ip }}"
+        vm_gateway: "{{ vm_gateway }}"
+        vm_dns: "{{ vm_dns }}"
+        rhsm_username: "{{ rhsm_username }}"
+        rhsm_password: "{{ rhsm_password }}"
 
     - name: Display added VM info
       debug:
@@ -123,7 +129,7 @@
       args:
         creates: /etc/yum.repos.d/epel.repo
 
-    - name: Clean and refresh repo metadata
+    - name: Clean and refresh metadata
       command: dnf makecache
 
     - name: Verify enabled repositories
