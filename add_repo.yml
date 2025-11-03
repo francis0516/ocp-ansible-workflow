@@ -1,10 +1,9 @@
 ---
 - name: Configure network, register VM, and enable RHEL repositories
   hosts: localhost
-  gather_facts: true
-  become: true
-
+  gather_facts: false
   vars:
+    vm_name: apache-vm
     vm_gateway: "10.0.0.1"
     vm_dns: "8.8.8.8"
     rhsm_username: "info@pacetechsystems.com"
@@ -16,25 +15,25 @@
       - codeready-builder-for-rhel-9-x86_64-rpms
     registration_retries: 3
     registration_delay: 10
-    vm_name: "apache-vm"
 
   tasks:
-    - name: Get VM IP from wait-for-SSH in-memory fact
-      set_fact:
-        vm_ip: "{{ hostvars[vm_name]['ansible_host'] }}"
-      # Assumes wait-for-SSH playbook has already run and added the VM to dynamic inventory
+    - name: Read VM IP from wait-for-SSH output file
+      slurp:
+        src: "/tmp/{{ vm_name }}_ip.txt"
+      register: vm_ip_file
 
-    - name: Display target VM info
+    - name: Set VM IP fact
+      set_fact:
+        vm_ip: "{{ vm_ip_file.content | b64decode | trim }}"
+
+    - name: Display VM IP
       debug:
-        msg:
-          - "VM host: {{ vm_name }}"
-          - "VM IP: {{ vm_ip }}"
+        msg: "VM IP retrieved from wait-for-SSH: {{ vm_ip }}"
 
     - name: Ensure NetworkManager is installed
       package:
         name: NetworkManager
         state: present
-        become: true
 
     - name: Configure static network for eth0
       shell: |
@@ -45,9 +44,9 @@
           ipv4.dns {{ vm_dns }} \
           ipv4.method manual autoconnect yes
         nmcli con up eth0
-      become: true
+      register: nmcli_result
 
-    - name: Test DNS resolution to google.com
+    - name: Test DNS resolution
       command: ping -c 2 google.com
       register: ping_result
       ignore_errors: true
