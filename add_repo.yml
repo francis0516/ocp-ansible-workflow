@@ -1,5 +1,5 @@
 ---
-- name: Register VM and enable RHEL repositories
+- name: Prepare VM network and enable RHEL repositories
   hosts: localhost
   gather_facts: false
 
@@ -14,6 +14,9 @@
       - rhel-9-for-x86_64-baseos-rpms
       - rhel-9-for-x86_64-appstream-rpms
       - codeready-builder-for-rhel-9-x86_64-rpms
+    google_dns:
+      - "8.8.8.8"
+      - "8.8.4.4"
 
   tasks:
     - name: Add VM to dynamic inventory
@@ -29,7 +32,7 @@
       debug:
         msg: "VM {{ vm_name }} ({{ vm_ip }}) added to dynamic group 'vms'"
 
-- name: Register system and enable repositories on VM
+- name: Configure network and register system on VM
   hosts: vms
   gather_facts: yes
   become: true
@@ -41,23 +44,49 @@
       - codeready-builder-for-rhel-9-x86_64-rpms
     registration_retries: 3
     registration_delay: 10
-    network_check_retries: 5
-    network_check_delay: 5
 
   tasks:
 
+    # -----------------------------
+    # Step 1: Configure network & DNS
+    # -----------------------------
+    - name: Ensure NetworkManager is installed
+      package:
+        name: NetworkManager
+        state: present
+
+    - name: Configure eth0 with DHCP and Google DNS
+      nmcli:
+        conn_name: eth0
+        ifname: eth0
+        type: ethernet
+        state: up
+        ipv4:
+          method: auto
+          dns: "{{ google_dns }}"
+          ignore_auto_dns: yes
+        ipv6:
+          method: ignore
+
+    - name: Restart NetworkManager to apply changes
+      service:
+        name: NetworkManager
+        state: restarted
+
+    - name: Verify connectivity
+      shell: |
+        ping -c 2 8.8.8.8 && ping -c 2 google.com
+      register: ping_test
+      failed_when: ping_test.rc != 0
+      changed_when: false
+
+    # -----------------------------
+    # Step 2: Install subscription-manager
+    # -----------------------------
     - name: Ensure subscription-manager is installed
       package:
         name: subscription-manager
         state: present
-
-    - name: Test network connectivity to Red Hat
-      shell: curl -sSf https://subscription.rhsm.redhat.com/ >/dev/null
-      register: rhsm_ping
-      retries: "{{ network_check_retries }}"
-      delay: "{{ network_check_delay }}"
-      until: rhsm_ping.rc == 0
-      failed_when: rhsm_ping.rc != 0
 
     - name: Unregister any existing registration
       shell: |
@@ -84,6 +113,9 @@
         state: present
         timeout: 60
 
+    # -----------------------------
+    # Step 3: Enable RHEL repositories
+    # -----------------------------
     - name: Disable all repos (clean start)
       shell: subscription-manager repos --disable="*"
 
