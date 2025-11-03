@@ -26,9 +26,6 @@
     max_ip_retries: 18          # Max retries (18 * 10 = 3 minutes)
 
   tasks:
-    # ========================================================================
-    # STEP 1: DISPLAY CONFIGURATION
-    # ========================================================================
     - name: Display VM configuration
       debug:
         msg:
@@ -41,9 +38,6 @@
           - "Network: {{ network_attachment }}"
           - "=========================================="
 
-    # ========================================================================
-    # STEP 2: CREATE VIRTUAL MACHINE
-    # ========================================================================
     - name: Provision Virtual Machine in OpenShift
       kubernetes.core.k8s:
         state: present
@@ -131,9 +125,6 @@
         msg: "VM {{ vm_name }} provisioned successfully"
       when: vm_creation.changed
 
-    # ========================================================================
-    # STEP 3: WAIT FOR DATAVOLUME
-    # ========================================================================
     - name: Wait for DataVolume to be ready
       kubernetes.core.k8s_info:
         api_version: cdi.kubevirt.io/v1beta1
@@ -148,13 +139,6 @@
       retries: 60
       delay: 10
 
-    - name: Display DataVolume status
-      debug:
-        msg: "DataVolume ready (Phase: {{ dv_info.resources[0].status.phase }})"
-
-    # ========================================================================
-    # STEP 4: WAIT FOR VM TO BE RUNNING
-    # ========================================================================
     - name: Wait for VM to be running
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
@@ -169,46 +153,24 @@
       retries: 30
       delay: 10
 
-    - name: Display VM running status
-      debug:
-        msg: "VM {{ vm_name }} is running, waiting for IPv4 address..."
-
-    # ========================================================================
-    # STEP 5: EXTRACT IPV4 DIRECTLY FROM VMI STATUS
-    # ========================================================================
     - name: Initialize IPv4 variables
       set_fact:
         vm_ipv4_addresses: []
         vm_ip: "No IPv4 assigned"
         all_ips: []
 
-    - name: Extract IPv4 addresses from VMI status
+    - name: Extract IPv4 addresses safely from VMI
       set_fact:
-        all_ips: >-
-          {{
-            (vmi_info.resources[0].status.interfaces | default([])) |
-            map(attribute='ipAddresses') |
-            select('defined') |
-            map('flatten') |
-            flatten |
-            list
-          }}
-        vm_ipv4_addresses: >-
-          {{
-            all_ips | select('match', '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$') | list
-          }}
+        all_ips: "{{ vmi_info.resources[0].status.interfaces | default([]) | map(attribute='ipAddresses') | select('defined') | flatten | list }}"
+        vm_ipv4_addresses: "{{ all_ips | select('search','^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$') | list }}"
         vm_ip: "{{ vm_ipv4_addresses[0] if vm_ipv4_addresses | length > 0 else 'No IPv4 assigned' }}"
 
-    - name: Display network information
+    - name: Display IPv4 extraction result
       debug:
         msg:
-          - "================================================"
-          - "Network Information for {{ vm_name }}"
-          - "================================================"
           - "All IPs detected: {{ all_ips | join(', ') if all_ips | length > 0 else 'None' }}"
           - "IPv4 addresses: {{ vm_ipv4_addresses | join(', ') }}"
           - "Selected IPv4: {{ vm_ip }}"
-          - "================================================"
 
     - name: Fail if no IPv4 address obtained
       fail:
@@ -218,19 +180,14 @@
           ========================================
           VM Name: {{ vm_name }}
           All IPs: {{ all_ips }}
-          
           ROOT CAUSE:
           The VMI did not report any IPv4 addresses.
-          
           SOLUTION:
           1. Verify your NetworkAttachmentDefinition has proper IPAM/subnets.
           2. Ensure the VM is running and reachable in the network.
           3. Delete and recreate the VMI if necessary.
       when: vm_ip == 'No IPv4 assigned'
 
-    # ========================================================================
-    # STEP 6: CHECK GUEST AGENT STATUS
-    # ========================================================================
     - name: Check guest agent connection status
       set_fact:
         guest_agent_connected: >-
@@ -240,9 +197,6 @@
             map(attribute='status') | first | default('Unknown'))
           }}
 
-    # ========================================================================
-    # STEP 7: EXPORT VARIABLES FOR DOWNSTREAM JOBS
-    # ========================================================================
     - name: Export variables for workflow
       set_stats:
         data:
@@ -252,15 +206,11 @@
           vm_project: "{{ vm_project }}"
         per_host: no
 
-    # ========================================================================
-    # STEP 8: DISPLAY DEPLOYMENT SUMMARY
-    # ========================================================================
     - name: Deployment summary
       debug:
         msg:
           - "=========================================="
           - "VM Deployment Complete!"
-          - "=========================================="
           - "VM Name: {{ vm_name }}"
           - "Namespace: {{ vm_project }}"
           - "IPv4 Address: {{ vm_ip }}"
@@ -269,8 +219,6 @@
           - "Password: {{ cloud_init_password }}"
           - "Network: {{ network_attachment }}"
           - "Guest Agent: {{ guest_agent_connected }}"
-          - "Detection Method: Guest Agent ✓"
-          - ""
           - "Exported Variables:"
           - "  vm_ip: {{ vm_ip }}"
           - "  vm_name: {{ vm_name }}"
