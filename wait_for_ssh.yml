@@ -1,19 +1,16 @@
----
 - name: Wait for VM IPv4 and SSH readiness
   hosts: localhost
   gather_facts: false
   vars:
-    vm_name: "apache-vm"
-    vm_project: "vm-migration-test"
-    cloud_init_password: "password"
-    max_ip_wait: 300       # total seconds to wait for IP
-    ip_poll_interval: 10   # seconds between polls
-    ssh_timeout: 300       # seconds for SSH wait
+    vm_name: apache-vm
+    vm_project: vm-migration-test
+    cloud_init_password: password
+    max_ip_wait: 300
+    ip_poll_interval: 10
+    ssh_timeout: 300
     ansible_ssh_common_args: '-o AddressFamily=inet -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
-    ip_file_path: "/tmp/{{ vm_name }}_ip.txt"
 
   tasks:
-
     - name: Poll VM for IPv4 address
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
@@ -32,39 +29,22 @@
       set_fact:
         vm_ip: "{{ vmi_info.resources[0].status.interfaces[0].ipAddress }}"
 
-    - name: Fail if no IP found
-      fail:
-        msg: "❌ VM {{ vm_name }} did not report an IPv4. Check guest agent."
-      when: vm_ip is not defined
-
-    - name: Wait for SSH port 22 to be available
+    - name: Wait for SSH port 22
       wait_for:
         host: "{{ vm_ip }}"
         port: 22
         timeout: "{{ ssh_timeout }}"
         state: started
 
-    - name: Confirm VM IPv4 and SSH readiness
-      debug:
-        msg:
-          - "✅ VM IPv4 detected: {{ vm_ip }}"
-          - "✅ SSH port 22 is reachable on {{ vm_ip }}"
-
     - name: Add VM to dynamic in-memory inventory
       add_host:
-        name: "target_vm_host"
+        name: "{{ vm_name }}"
         ansible_host: "{{ vm_ip }}"
         ansible_user: root
         ansible_password: "{{ cloud_init_password }}"
         ansible_ssh_common_args: "{{ ansible_ssh_common_args }}"
         groups: vms
 
-    - name: Write VM IP to temporary file for add-repo playbook
-      copy:
-        content: "{{ vm_ip }}"
-        dest: "{{ ip_file_path }}"
-        mode: '0644'
-
     - name: Display added VM info
       debug:
-        msg: "VM {{ vm_name }} ({{ vm_ip }}) added to dynamic group 'vms' and saved to {{ ip_file_path }}"
+        msg: "VM {{ vm_name }} ({{ vm_ip }}) added to dynamic group 'vms'"
