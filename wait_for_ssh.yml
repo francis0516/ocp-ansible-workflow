@@ -6,13 +6,12 @@
     vm_name: apache-vm
     vm_project: vm-migration-test
     cloud_init_password: password
-    max_ip_wait: 300       # total time to wait for IP
-    ip_poll_interval: 10   # seconds between polls
-    ssh_timeout: 300       # seconds for SSH wait
+    max_ip_wait: 300
+    ip_poll_interval: 10
+    ssh_timeout: 300
     ansible_ssh_common_args: '-o AddressFamily=inet -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
 
   tasks:
-
     - name: Poll VM for IPv4 address
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
@@ -38,21 +37,17 @@
         timeout: "{{ ssh_timeout }}"
         state: started
 
-    - name: Confirm VM IPv4 and SSH readiness
-      debug:
-        msg:
-          - "✅ VM IPv4 detected: {{ vm_ip }}"
-          - "✅ SSH port 22 is reachable on {{ vm_ip }}"
-
     - name: Add VM to dynamic in-memory inventory
       add_host:
-        name: "target_vm_host"
+        name: "{{ vm_name }}"
         ansible_host: "{{ vm_ip }}"
         ansible_user: root
         ansible_password: "{{ cloud_init_password }}"
         ansible_ssh_common_args: "{{ ansible_ssh_common_args }}"
         groups: vms
 
-    - name: Display added VM info
+    - name: Confirm VM IPv4 and SSH readiness
       debug:
-        msg: "VM {{ vm_name }} ({{ vm_ip }}) added to dynamic group 'vms' for next tasks"
+        msg:
+          - "✅ VM IPv4 detected: {{ vm_ip }}"
+          - "✅ SSH port 22 is reachable on {{ vm_ip }}"
