@@ -20,7 +20,41 @@
   gather_facts: yes
   become: yes
 
+  vars:
+    vm_ip: "{{ hostvars['localhost']['vm_ip'] | default('10.0.0.130') }}"
+
   tasks:
+    - name: Configure persistent static network for eth0
+      block:
+        - name: Delete existing eth0 connection (if any)
+          command: nmcli con delete eth0
+          ignore_errors: yes
+
+        - name: Add new eth0 connection
+          command: >
+            nmcli connection add type ethernet autoconnect yes con-name eth0 ifname eth0
+          ignore_errors: yes
+
+        - name: Configure IP address using vm_ip
+          command: nmcli connection modify eth0 ipv4.addresses {{ vm_ip }}/24 ipv4.method manual
+
+        - name: Configure DNS servers
+          command: nmcli connection modify eth0 ipv4.dns "10.0.0.17,8.8.8.8"
+
+        - name: Configure gateway
+          command: nmcli connection modify eth0 ipv4.gateway 10.0.0.1
+
+        - name: Configure DNS search domain
+          command: nmcli connection modify eth0 ipv4.dns-search ocp4.henogez.com
+
+        - name: Bring up eth0
+          command: nmcli connection up eth0
+
+        - name: Restart NetworkManager
+          systemd:
+            name: NetworkManager
+            state: restarted
+
     - name: Install Apache (httpd) package
       dnf:
         name: httpd
