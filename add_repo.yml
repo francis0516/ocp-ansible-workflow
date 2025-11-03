@@ -1,9 +1,10 @@
-- name: Configure network, register VM, and enable RHEL repositories
-  hosts: vms
-  become: true
-  gather_facts: true
+---
+- name: Add VM to dynamic inventory using IP from wait-for-SSH
+  hosts: localhost
+  gather_facts: false
 
   vars:
+    vm_name: "apache-vm"
     vm_gateway: "10.0.0.1"
     vm_dns: "8.8.8.8"
     rhsm_username: "info@pacetechsystems.com"
@@ -13,8 +14,37 @@
       - rhel-9-for-x86_64-baseos-rpms
       - rhel-9-for-x86_64-appstream-rpms
       - codeready-builder-for-rhel-9-x86_64-rpms
-    registration_retries: 3
-    registration_delay: 10
+
+  tasks:
+    - name: Ensure VM IP fact exists
+      fail:
+        msg: "❌ VM IP is not defined. Make sure wait-for-SSH playbook has run first."
+      when: vm_ip is not defined
+
+    - name: Add VM to dynamic in-memory inventory
+      add_host:
+        name: "{{ vm_name }}"
+        ansible_host: "{{ vm_ip }}"
+        ansible_user: root
+        ansible_password: password
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+        groups: vms
+        vm_gateway: "{{ vm_gateway }}"
+        vm_dns: "{{ vm_dns }}"
+        rhsm_username: "{{ rhsm_username }}"
+        rhsm_password: "{{ rhsm_password }}"
+        rhel_version: "{{ rhel_version }}"
+
+    - name: Display added VM info
+      debug:
+        msg: "✅ VM {{ vm_name }} ({{ vm_ip }}) added to dynamic group 'vms'"
+
+# ---------------------------------------------------------------------------
+
+- name: Configure network, register VM, and enable RHEL repositories
+  hosts: vms
+  become: true
+  gather_facts: true
 
   tasks:
     - name: Ensure NetworkManager is installed
@@ -22,18 +52,18 @@
         name: NetworkManager
         state: present
 
-    - name: Configure static network for eth0
+    - name: Add eth0 static network connection
       shell: |
         nmcli con delete eth0 || true
         nmcli con add type ethernet ifname eth0 con-name eth0 \
-          ipv4.addresses {{ ansible_host }}/24 \
+          ipv4.addresses {{ vm_ip }}/24 \
           ipv4.gateway {{ vm_gateway }} \
           ipv4.dns {{ vm_dns }} \
           ipv4.method manual autoconnect yes
         nmcli con up eth0
       register: nmcli_result
 
-    - name: Test DNS resolution
+    - name: Test DNS resolution to google.com
       command: ping -c 2 google.com
       register: ping_result
       ignore_errors: true
@@ -61,8 +91,8 @@
           --password='{{ rhsm_password }}' \
           --auto-attach
       register: register_result
-      retries: "{{ registration_retries }}"
-      delay: "{{ registration_delay }}"
+      retries: 3
+      delay: 10
       until: register_result.rc == 0
       no_log: false
 
