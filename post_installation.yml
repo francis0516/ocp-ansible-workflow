@@ -1,5 +1,24 @@
 ---
-- hosts: dynamic_vms   # <-- updated to match the group from wait-for-SSH / add-repo
+- name: Prepare VM inventory if running standalone
+  hosts: localhost
+  gather_facts: false
+  vars:
+    cloud_init_password: password
+    ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+  tasks:
+    - name: Add VM to dynamic inventory if vm_ip is passed
+      add_host:
+        name: apache-vm
+        ansible_host: "{{ vm_ip }}"
+        ansible_user: root
+        ansible_password: "{{ cloud_init_password }}"
+        ansible_ssh_common_args: "{{ ansible_ssh_common_args }}"
+        groups: dynamic_vms
+      when: vm_ip is defined
+
+---
+
+- hosts: dynamic_vms
   gather_facts: yes
   become: yes
 
