@@ -33,21 +33,21 @@
 
 # ---------------------------------------------------------------------------
 
-- name: Configure network and register RHEL system (no community.general dependency)
+- name: Configure static network and register RHEL system
   hosts: vms
   become: true
   gather_facts: true
 
   vars:
+    vm_ip: "10.0.0.118"
+    vm_gateway: "10.0.0.1"
+    vm_dns: "8.8.8.8"
+    registration_retries: 3
+    registration_delay: 10
     repos_to_enable:
       - rhel-9-for-x86_64-baseos-rpms
       - rhel-9-for-x86_64-appstream-rpms
       - codeready-builder-for-rhel-9-x86_64-rpms
-    registration_retries: 3
-    registration_delay: 10
-    vm_ip: "10.0.0.118"
-    vm_gateway: "10.0.0.1"
-    vm_dns: "8.8.8.8"
 
   tasks:
     - name: Ensure NetworkManager is installed and running
@@ -55,18 +55,34 @@
         name: NetworkManager
         state: present
 
-    - name: Configure static network manually for eth0
+    - name: Ensure NetworkManager service is started and enabled
+      service:
+        name: NetworkManager
+        state: started
+        enabled: true
+
+    - name: Configure static network for eth0
       shell: |
         nmcli con delete eth0 || true
         nmcli con add type ethernet ifname eth0 con-name eth0 ipv4.addresses {{ vm_ip }}/24 ipv4.gateway {{ vm_gateway }} ipv4.dns {{ vm_dns }} ipv4.method manual autoconnect yes
         nmcli con up eth0
-      ignore_errors: false
+      args:
+        executable: /bin/bash
+
+    - name: Verify network configuration
+      command: nmcli device show eth0
+      register: nmcli_show
+      changed_when: false
+
+    - name: Display network configuration
+      debug:
+        var: nmcli_show.stdout_lines
 
     - name: Wait for internet connectivity
       wait_for:
-        host: google.com
-        port: 80
-        timeout: 30
+        host: 8.8.8.8
+        port: 53
+        timeout: 40
         state: started
 
     - name: Test DNS resolution
@@ -95,8 +111,8 @@
     - name: Register the system with Red Hat Subscription Manager
       shell: |
         subscription-manager register \
-          --username='{{ rhsm_username }}' \
-          --password='{{ rhsm_password }}' \
+          --username="{{ rhsm_username }}" \
+          --password="{{ rhsm_password }}" \
           --auto-attach
       register: register_result
       retries: "{{ registration_retries }}"
