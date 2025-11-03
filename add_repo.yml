@@ -1,8 +1,8 @@
 ---
 - name: Configure network, register VM, and enable RHEL repositories
-  hosts: vms   # picks up VM from wait-for-SSH in-memory inventory
-  become: true
+  hosts: localhost
   gather_facts: true
+  become: true
 
   vars:
     vm_gateway: "10.0.0.1"
@@ -16,22 +16,36 @@
       - codeready-builder-for-rhel-9-x86_64-rpms
     registration_retries: 3
     registration_delay: 10
+    vm_name: "apache-vm"
 
   tasks:
+    - name: Get VM IP from wait-for-SSH in-memory fact
+      set_fact:
+        vm_ip: "{{ hostvars[vm_name]['ansible_host'] }}"
+      # Assumes wait-for-SSH playbook has already run and added the VM to dynamic inventory
+
+    - name: Display target VM info
+      debug:
+        msg:
+          - "VM host: {{ vm_name }}"
+          - "VM IP: {{ vm_ip }}"
+
     - name: Ensure NetworkManager is installed
       package:
         name: NetworkManager
         state: present
+        become: true
 
     - name: Configure static network for eth0
       shell: |
         nmcli con delete eth0 || true
         nmcli con add type ethernet ifname eth0 con-name eth0 \
-          ipv4.addresses {{ ansible_host }}/24 \
+          ipv4.addresses {{ vm_ip }}/24 \
           ipv4.gateway {{ vm_gateway }} \
           ipv4.dns {{ vm_dns }} \
           ipv4.method manual autoconnect yes
         nmcli con up eth0
+      become: true
 
     - name: Test DNS resolution to google.com
       command: ping -c 2 google.com
