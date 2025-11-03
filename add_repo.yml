@@ -1,5 +1,5 @@
 ---
-- name: Prepare VM network and enable RHEL repositories
+- name: Register VM, configure network, and enable RHEL repositories
   hosts: localhost
   gather_facts: false
 
@@ -29,58 +29,50 @@
       debug:
         msg: "VM {{ vm_name }} ({{ vm_ip }}) added to dynamic group 'vms'"
 
-- name: Configure network, verify connectivity, and register VM
+# =====================================================================
+# Configure network and DNS
+# =====================================================================
+- name: Configure network on VM
   hosts: vms
   gather_facts: yes
   become: true
-
-  vars:
-    repos_to_enable:
-      - rhel-9-for-x86_64-baseos-rpms
-      - rhel-9-for-x86_64-appstream-rpms
-      - codeready-builder-for-rhel-9-x86_64-rpms
-    registration_retries: 3
-    registration_delay: 10
-    network_check_retries: 10
-    network_check_delay: 10
+  collections:
+    - community.network
 
   tasks:
-    # ============================================================
-    # NETWORK CONFIGURATION
-    # ============================================================
-    - name: Ensure NetworkManager is installed
-      package:
-        name: NetworkManager
-        state: present
-
-    - name: Ensure NetworkManager service is running
-      service:
+    - name: Ensure NetworkManager is running
+      systemd:
         name: NetworkManager
         state: started
         enabled: true
 
-    - name: Add DHCP connection for eth0 if it does not exist
-      command: nmcli con add type ethernet ifname eth0 con-name eth0 dhcp yes
-      args:
-        creates: /etc/NetworkManager/system-connections/eth0.nmconnection
-
-    - name: Set Google DNS for eth0
-      command: nmcli con modify eth0 ipv4.dns "8.8.8.8 8.8.4.4"
+    - name: Configure eth0 for DHCP with Google DNS
+      nmcli:
+        conn_name: eth0
+        ifname: eth0
+        type: ethernet
+        state: present
+        ipv4:
+          method: auto
+          dns:
+            - 8.8.8.8
+            - 8.8.4.4
+          ignore_auto_dns: no
 
     - name: Bring up eth0 connection
-      command: nmcli con up eth0
+      nmcli:
+        conn_name: eth0
+        state: up
 
-    - name: Wait for network connectivity (ping 8.8.8.8)
-      shell: ping -c 1 8.8.8.8
-      register: ping_result
-      retries: "{{ network_check_retries }}"
-      delay: "{{ network_check_delay }}"
-      until: ping_result.rc == 0
-      ignore_errors: false
+# =====================================================================
+# Register system and enable repositories
+# =====================================================================
+- name: Register system and enable RHEL repositories on VM
+  hosts: vms
+  gather_facts: yes
+  become: true
 
-    # ============================================================
-    # SUBSCRIPTION REGISTRATION AND REPO CONFIGURATION
-    # ============================================================
+  tasks:
     - name: Ensure subscription-manager is installed
       package:
         name: subscription-manager
@@ -100,8 +92,8 @@
           --password='{{ rhsm_password }}' \
           --auto-attach
       register: register_result
-      retries: "{{ registration_retries }}"
-      delay: "{{ registration_delay }}"
+      retries: 3
+      delay: 10
       until: register_result.rc == 0
       no_log: true
 
