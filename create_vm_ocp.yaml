@@ -1,10 +1,11 @@
 ---
-- name: Create a VM on OpenShift Virtualization with physical IPv4
+- name: Create VM on OpenShift Virtualization with IPv4 extraction
   hosts: localhost
   connection: local
   gather_facts: false
 
   vars:
+    # VM Configuration
     vm_name: apache-vm
     vm_project: vm-migration-test
     storage_class: nfs-storage-class
@@ -13,22 +14,36 @@
     cpu_cores: 2
     cpu_sockets: 1
     cpu_threads: 1
+    
+    # Authentication
     cloud_init_password: password
+    
+    # Network Configuration
     network_attachment: br-ex-network
-    ip_poll_interval: 10
-    max_ip_retries: 30
+    
+    # Timing Configuration
+    ip_poll_interval: 10        # Seconds between IP checks
+    max_ip_retries: 18          # Max retries (18 * 10 = 3 minutes)
 
   tasks:
+    # ==========================================================================
+    # STEP 1: DISPLAY CONFIGURATION
+    # ==========================================================================
     - name: Display VM configuration
       debug:
         msg:
+          - "=========================================="
           - "Creating VM: {{ vm_name }}"
           - "Namespace: {{ vm_project }}"
           - "Memory: {{ memory_size }}"
           - "CPU Cores: {{ cpu_cores }}"
           - "Storage Class: {{ storage_class }}"
           - "Network: {{ network_attachment }}"
+          - "=========================================="
 
+    # ==========================================================================
+    # STEP 2: CREATE VIRTUAL MACHINE
+    # ==========================================================================
     - name: Provision Virtual Machine in OpenShift
       kubernetes.core.k8s:
         state: present
@@ -39,6 +54,8 @@
           metadata:
             name: "{{ vm_name }}"
             namespace: "{{ vm_project }}"
+            labels:
+              app: "{{ vm_name }}"
           spec:
             running: true
             dataVolumeTemplates:
@@ -109,6 +126,14 @@
                           - systemctl enable sshd
       register: vm_creation
 
+    - name: Display VM creation result
+      debug:
+        msg: "✓ VM {{ vm_name }} provisioned successfully"
+      when: vm_creation.changed
+
+    # ==========================================================================
+    # STEP 3: WAIT FOR DATAVOLUME
+    # ==========================================================================
     - name: Wait for DataVolume to be ready
       kubernetes.core.k8s_info:
         api_version: cdi.kubevirt.io/v1beta1
@@ -123,6 +148,13 @@
       retries: 60
       delay: 10
 
+    - name: Display DataVolume status
+      debug:
+        msg: "✓ DataVolume ready (Phase: {{ dv_info.resources[0].status.phase }})"
+
+    # ==========================================================================
+    # STEP 4: WAIT FOR VM TO BE RUNNING
+    # ==========================================================================
     - name: Wait for VM to be running
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
@@ -137,14 +169,25 @@
       retries: 30
       delay: 10
 
-    - name: Initialize IPv4 facts
+    - name: Display VM running status
+      debug:
+        msg: "✓ VM {{ vm_name }} is running, waiting for IPv4 address..."
+
+    # ==========================================================================
+    # STEP 5: EXTRACT IPv4 ADDRESS (WITH FALLBACK)
+    # ==========================================================================
+    - name: Initialize IPv4 variables
       set_fact:
         vm_ipv4_addresses: []
         vm_ip: "No IPv4 assigned"
+        all_ips: []
 
-    - name: Poll VM for IPv4 address (guest agent or SSH fallback)
+    - name: Extract IPv4 address with fallback
       block:
-        - name: Poll VMI status for IPv4 (guest agent)
+        # ----------------------------------------------------------------------
+        # METHOD 1: Try Guest Agent (Preferred)
+        # ----------------------------------------------------------------------
+        - name: Poll for IPv4 via guest agent
           kubernetes.core.k8s_info:
             api_version: kubevirt.io/v1
             kind: VirtualMachineInstance
@@ -159,15 +202,23 @@
             select('defined') |
             map('flatten') |
             flatten |
-            select('match', '^(?:10\\.|192\\.168\\.|172\\.)') |
+            select('match', '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$') |
             list | length) > 0)
           retries: "{{ max_ip_retries }}"
           delay: "{{ ip_poll_interval }}"
           ignore_errors: true
 
         - name: Extract IPv4 from guest agent
-          when: vmi_network_info.resources | length > 0
           set_fact:
+            all_ips: >-
+              {{
+                (vmi_network_info.resources[0].status.interfaces | default([])) |
+                map(attribute='ipAddresses') |
+                select('defined') |
+                map('flatten') |
+                flatten |
+                list
+              }}
             vm_ipv4_addresses: >-
               {{
                 (vmi_network_info.resources[0].status.interfaces | default([])) |
@@ -175,18 +226,124 @@
                 select('defined') |
                 map('flatten') |
                 flatten |
-                select('match', '^(?:10\\.|192\\.168\\.|172\\.)') |
+                select('match', '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$') |
                 list
               }}
+          when: vmi_network_info.resources | length > 0
+
+        - name: Display guest agent extraction result
+          debug:
+            msg: "{{ '✓' if vm_ipv4_addresses | length > 0 else '✗' }} Guest agent: {{ vm_ipv4_addresses if vm_ipv4_addresses | length > 0 else 'No IPv4 reported' }}"
+
+        # ----------------------------------------------------------------------
+        # METHOD 2: SSH Fallback (if guest agent failed)
+        # ----------------------------------------------------------------------
+        - name: Try SSH fallback if needed
+          when: vm_ipv4_addresses | length == 0
+          block:
+            - name: Get connection IP for SSH
+              set_fact:
+                ssh_ip: "{{ vmi_network_info.resources[0].status.interfaces[0].ipAddress | default('') }}"
+
+            - name: Display SSH fallback attempt
+              debug:
+                msg: "Guest agent failed, attempting SSH extraction via {{ ssh_ip }}..."
+
+            - name: Wait for SSH to be available
+              wait_for:
+                host: "{{ ssh_ip }}"
+                port: 22
+                timeout: 90
+                delay: 10
+              when: ssh_ip != ''
+              ignore_errors: true
+              register: ssh_available
+
+            - name: Extract IPv4 via SSH
+              shell: |
+                sshpass -p '{{ cloud_init_password }}' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 root@{{ ssh_ip }} "ip -4 addr show eth0 | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){3}' | head -1"
+              register: ssh_ipv4
+              when: 
+                - ssh_ip != ''
+                - ssh_available is succeeded
+              ignore_errors: true
+              changed_when: false
+
+            - name: Store SSH-extracted IPv4
+              set_fact:
+                vm_ipv4_addresses: ["{{ ssh_ipv4.stdout | trim }}"]
+              when:
+                - ssh_ipv4 is defined
+                - ssh_ipv4.rc is defined
+                - ssh_ipv4.rc == 0
+                - ssh_ipv4.stdout | trim != ''
+
+            - name: Display SSH extraction result
+              debug:
+                msg: "{{ '✓' if vm_ipv4_addresses | length > 0 else '✗' }} SSH extraction: {{ vm_ipv4_addresses if vm_ipv4_addresses | length > 0 else 'Failed' }}"
+
+        # ----------------------------------------------------------------------
+        # Set final IPv4
+        # ----------------------------------------------------------------------
+        - name: Set final VM IP
+          set_fact:
             vm_ip: "{{ vm_ipv4_addresses[0] if vm_ipv4_addresses | length > 0 else 'No IPv4 assigned' }}"
 
-        - name: Fail if IPv4 still missing
-          when: vm_ip == '' or vm_ip == 'No IPv4 assigned'
-          fail:
-            msg: >
-              ERROR: No IPv4 address obtained for {{ vm_name }} on br-ex network.
+        - name: Display network information
+          debug:
+            msg:
+              - "================================================"
+              - "Network Information for {{ vm_name }}"
+              - "================================================"
+              - "All IPs detected: {{ all_ips | join(', ') if all_ips | length > 0 else 'None' }}"
+              - "IPv4 addresses: {{ vm_ipv4_addresses | join(', ') }}"
+              - "Selected IPv4: {{ vm_ip }}"
+              - "Detection method: {{ 'Guest Agent' if vmi_network_info.failed is not defined or not vmi_network_info.failed else 'SSH Fallback' }}"
+              - "================================================"
 
-    - name: Check guest agent status
+        # ----------------------------------------------------------------------
+        # Fail if no IPv4 obtained
+        # ----------------------------------------------------------------------
+        - name: Fail if no IPv4 address obtained
+          fail:
+            msg: |
+              ========================================
+              ERROR: No IPv4 address could be obtained
+              ========================================
+              
+              VM Name: {{ vm_name }}
+              All IPs: {{ all_ips }}
+              
+              Guest Agent: Failed to report IPv4
+              SSH Fallback: Failed to extract IPv4
+              
+              ROOT CAUSE:
+              Your NetworkAttachmentDefinition is missing the "subnets" field.
+              
+              SOLUTION:
+              1. Update your br-ex-network NAD to include the subnet:
+                 
+                 oc edit network-attachment-definitions br-ex-network -n {{ vm_project }}
+                 
+                 Add this line in the config (before closing brace):
+                 "subnets":"10.0.0.0/24"
+              
+              2. Delete and restart the VM:
+                 oc delete vmi {{ vm_name }} -n {{ vm_project }}
+              
+              3. Verify the fix:
+                 oc get vmi {{ vm_name }} -n {{ vm_project }} -o jsonpath='{.status.interfaces[0].ipAddresses}'
+                 (Should show: ["10.0.0.X","fe80::..."])
+              
+              4. Run the playbook again
+              
+              See the artifact "br-ex-network-nad-with-ipv4.yaml" for the correct NAD configuration.
+          when: vm_ip == 'No IPv4 assigned'
+
+    # ==========================================================================
+    # STEP 6: CHECK GUEST AGENT STATUS
+    # ==========================================================================
+    - name: Check guest agent connection status
       set_fact:
         guest_agent_connected: >-
           {{
@@ -195,16 +352,39 @@
             map(attribute='status') | first | default('Unknown'))
           }}
 
-    - name: Display VM deployment summary
+    # ==========================================================================
+    # STEP 7: EXPORT VARIABLES FOR DOWNSTREAM JOBS
+    # ==========================================================================
+    - name: Export variables for workflow
+      set_stats:
+        data:
+          vm_ip: "{{ vm_ip }}"
+          vm_ipv4: "{{ vm_ipv4_addresses | join(',') }}"
+          vm_name: "{{ vm_name }}"
+          vm_project: "{{ vm_project }}"
+        per_host: no
+
+    # ==========================================================================
+    # STEP 8: DISPLAY DEPLOYMENT SUMMARY
+    # ==========================================================================
+    - name: Deployment summary
       debug:
         msg:
-          - "======================================"
-          - "VM Deployment Complete Successfully!"
+          - "=========================================="
+          - "VM Deployment Complete!"
+          - "=========================================="
           - "VM Name: {{ vm_name }}"
+          - "Namespace: {{ vm_project }}"
           - "IPv4 Address: {{ vm_ip }}"
-          - "All IPv4 Addresses: {{ vm_ipv4_addresses | join(', ') }}"
+          - "All IPv4s: {{ vm_ipv4_addresses | join(', ') }}"
           - "Username: root"
           - "Password: {{ cloud_init_password }}"
           - "Network: {{ network_attachment }}"
           - "Guest Agent: {{ guest_agent_connected }}"
-          - "======================================"
+          - "Detection Method: {{ 'Guest Agent ✓' if vmi_network_info.failed is not defined or not vmi_network_info.failed else 'SSH Fallback ⚠' }}"
+          - ""
+          - "Exported Variables:"
+          - "  vm_ip: {{ vm_ip }}"
+          - "  vm_name: {{ vm_name }}"
+          - "  vm_project: {{ vm_project }}"
+          - "=========================================="
