@@ -1,6 +1,6 @@
 ---
 - name: Configure network, register VM, and enable RHEL repositories
-  hosts: localhost
+  hosts: all
   gather_facts: false
   vars:
     vm_name: apache-vm
@@ -15,21 +15,29 @@
       - codeready-builder-for-rhel-9-x86_64-rpms
     registration_retries: 3
     registration_delay: 10
+    cloud_init_password: "password"
+    ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
-  tasks:
-    - name: Read VM IP from wait-for-SSH output file
-      slurp:
-        src: "/tmp/{{ vm_name }}_ip.txt"
-      register: vm_ip_file
-
-    - name: Set VM IP fact
-      set_fact:
-        vm_ip: "{{ vm_ip_file.content | b64decode | trim }}"
-
-    - name: Display VM IP
+  pre_tasks:
+    - name: Display VM IP received from previous playbook
+      delegate_to: localhost
       debug:
-        msg: "VM IP retrieved from wait-for-SSH: {{ vm_ip }}"
+        msg: "✅ Using VM IP passed from workflow: {{ vm_ip }}"
 
+    - name: Add apache-vm to in-memory inventory
+      delegate_to: localhost
+      add_host:
+        name: "{{ vm_name }}"
+        ansible_host: "{{ vm_ip }}"
+        ansible_user: root
+        ansible_password: "{{ cloud_init_password }}"
+        ansible_ssh_common_args: "{{ ansible_ssh_common_args }}"
+        groups: dynamic_vms
+
+- name: Configure repositories inside VM
+  hosts: dynamic_vms
+  gather_facts: false
+  tasks:
     - name: Ensure NetworkManager is installed
       package:
         name: NetworkManager
@@ -39,7 +47,7 @@
       shell: |
         nmcli con delete eth0 || true
         nmcli con add type ethernet ifname eth0 con-name eth0 \
-          ipv4.addresses {{ vm_ip }}/24 \
+          ipv4.addresses {{ ansible_host }}/24 \
           ipv4.gateway {{ vm_gateway }} \
           ipv4.dns {{ vm_dns }} \
           ipv4.method manual autoconnect yes
