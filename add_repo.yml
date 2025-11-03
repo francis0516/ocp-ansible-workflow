@@ -49,22 +49,27 @@
         name: NetworkManager
         state: present
 
-    - name: Check if eth0 already has correct IP
-      command: nmcli -g IP4.ADDRESS dev show eth0
-      register: eth0_ip
-      ignore_errors: true
+    - name: Detect primary network interface
+      command: nmcli -t -f DEVICE,STATE dev
+      register: nmcli_devices
 
-    - name: Configure static network for eth0 if IP not set
-      shell: |
-        nmcli con delete eth0 || true
-        nmcli con add type ethernet ifname eth0 con-name eth0 \
-          ipv4.addresses {{ ansible_host }}/24 \
-          ipv4.gateway {{ vm_gateway }} \
-          ipv4.dns {{ vm_dns }} \
-          ipv4.method manual autoconnect yes
-        nmcli con up eth0
-      when: ansible_host + '/24' not in eth0_ip.stdout
+    - name: Set primary interface fact
+      set_fact:
+        primary_iface: "{{ nmcli_devices.stdout_lines | select('search', 'connected') | map('split', ':') | map('first') | list | first | default('eth0') }}"
 
+    - name: Configure static network for primary interface
+      nmcli:
+        conn_name: "{{ primary_iface }}"
+        ifname: "{{ primary_iface }}"
+        type: ethernet
+        ip4: "{{ ansible_host }}/24"
+        gw4: "{{ vm_gateway }}"
+        dns4: "{{ vm_dns }}"
+        state: present
+        autoconnect: yes
+
+    - name: Bring up the primary interface
+      command: nmcli con up "{{ primary_iface }}"
 
     - name: Test DNS resolution
       command: ping -c 2 google.com
@@ -75,24 +80,28 @@
       debug:
         var: ping_result
 
+    - name: Test RHSM connectivity
+      command: curl -s https://subscription.rhsm.redhat.com:443
+      register: rhsm_test
+      ignore_errors: true
+
+    - name: Fail if RHSM is not reachable
+      fail:
+        msg: "❌ RHSM server is not reachable. Check network/DNS."
+      when: rhsm_test.rc != 0
+
     - name: Ensure subscription-manager is installed
       package:
         name: subscription-manager
         state: present
 
-    - name: Check if system is already registered
-      shell: subscription-manager identity
-      register: subscription_status
-      ignore_errors: true
-
-    - name: Register system if not already registered
+    - name: Register system with RHSM (force if needed)
       shell: |
         subscription-manager register \
           --username='{{ rhsm_username }}' \
           --password='{{ rhsm_password }}' \
           --auto-attach \
           --force
-      when: subscription_status.rc != 0
       retries: "{{ registration_retries }}"
       delay: "{{ registration_delay }}"
       register: register_result
