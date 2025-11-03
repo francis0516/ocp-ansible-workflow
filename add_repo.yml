@@ -41,12 +41,23 @@
       - codeready-builder-for-rhel-9-x86_64-rpms
     registration_retries: 3
     registration_delay: 10
+    network_check_retries: 5
+    network_check_delay: 5
 
   tasks:
+
     - name: Ensure subscription-manager is installed
       package:
         name: subscription-manager
         state: present
+
+    - name: Test network connectivity to Red Hat
+      shell: curl -sSf https://subscription.rhsm.redhat.com/ >/dev/null
+      register: rhsm_ping
+      retries: "{{ network_check_retries }}"
+      delay: "{{ network_check_delay }}"
+      until: rhsm_ping.rc == 0
+      failed_when: rhsm_ping.rc != 0
 
     - name: Unregister any existing registration
       shell: |
