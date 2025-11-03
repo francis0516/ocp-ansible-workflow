@@ -1,5 +1,5 @@
 ---
-- hosts: vms
+- hosts: dynamic_vms   # <-- updated to match the group from wait-for-SSH / add-repo
   gather_facts: yes
   become: yes
 
