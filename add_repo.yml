@@ -30,9 +30,9 @@
 
     - name: Display VM IP
       debug:
-        msg: "✅ Using VM IP from workflow: {{ vm_ip }}"
+        msg: "✅ Using VM IP from wait-for-SSH: {{ vm_ip }}"
 
-    - name: Add apache-vm to in-memory inventory
+    - name: Add VM to in-memory inventory
       add_host:
         name: "{{ vm_name }}"
         ansible_host: "{{ vm_ip }}"
@@ -40,18 +40,23 @@
         ansible_password: "{{ cloud_init_password }}"
         ansible_ssh_common_args: "{{ ansible_ssh_common_args }}"
         groups: dynamic_vms
-        vm_gateway: "{{ vm_gateway }}"
-        vm_dns: "{{ vm_dns }}"
-        repos_to_enable: "{{ repos_to_enable }}"
-        rhsm_username: "{{ rhsm_username }}"
-        rhsm_password: "{{ rhsm_password }}"
-        rhel_version: "{{ rhel_version }}"
-        registration_retries: "{{ registration_retries }}"
-        registration_delay: "{{ registration_delay }}"
 
 - name: Configure network, register system, and enable RHEL repositories
   hosts: dynamic_vms
   gather_facts: false
+  vars:
+    vm_gateway: "10.0.0.1"
+    vm_dns: "8.8.8.8"
+    rhsm_username: "info@pacetechsystems.com"
+    rhsm_password: "Silverado@8787!!!!"
+    rhel_version: 9
+    repos_to_enable:
+      - rhel-9-for-x86_64-baseos-rpms
+      - rhel-9-for-x86_64-appstream-rpms
+      - codeready-builder-for-rhel-9-x86_64-rpms
+    registration_retries: 3
+    registration_delay: 10
+
   tasks:
     - name: Ensure NetworkManager is installed
       package:
@@ -88,16 +93,6 @@
     - name: Display DNS test result
       debug:
         var: ping_result
-
-    - name: Test RHSM connectivity
-      command: curl -s https://subscription.rhsm.redhat.com:443
-      register: rhsm_test
-      ignore_errors: true
-
-    - name: Fail if RHSM is not reachable
-      fail:
-        msg: "❌ RHSM server is not reachable. Check network/DNS."
-      when: rhsm_test.rc != 0
 
     - name: Ensure subscription-manager is installed
       package:
