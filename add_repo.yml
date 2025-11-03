@@ -16,6 +16,9 @@
       - codeready-builder-for-rhel-9-x86_64-rpms
 
   tasks:
+    # ============================================================
+    # STEP 1: Add VM to dynamic inventory
+    # ============================================================
     - name: Add VM to dynamic inventory
       add_host:
         name: "{{ vm_name }}"
@@ -29,50 +32,41 @@
       debug:
         msg: "VM {{ vm_name }} ({{ vm_ip }}) added to dynamic group 'vms'"
 
-# =====================================================================
-# Configure network and DNS
-# =====================================================================
-- name: Configure network on VM
+- name: Configure network, register system, and enable repositories on VM
   hosts: vms
   gather_facts: yes
   become: true
-  collections:
-    - community.network
+
+  vars:
+    repos_to_enable:
+      - rhel-9-for-x86_64-baseos-rpms
+      - rhel-9-for-x86_64-appstream-rpms
+      - codeready-builder-for-rhel-9-x86_64-rpms
+    registration_retries: 3
+    registration_delay: 10
 
   tasks:
-    - name: Ensure NetworkManager is running
-      systemd:
-        name: NetworkManager
-        state: started
-        enabled: true
-
+    # ============================================================
+    # STEP 1: Ensure network is configured
+    # ============================================================
     - name: Configure eth0 for DHCP with Google DNS
-      nmcli:
-        conn_name: eth0
-        ifname: eth0
-        type: ethernet
-        state: present
-        ipv4:
-          method: auto
-          dns:
-            - 8.8.8.8
-            - 8.8.4.4
-          ignore_auto_dns: no
+      ansible.builtin.shell: |
+        nmcli connection add type ethernet ifname eth0 con-name eth0 || true
+        nmcli connection modify eth0 ipv4.method auto
+        nmcli connection modify eth0 ipv4.dns "8.8.8.8 8.8.4.4"
+        nmcli connection up eth0
+      args:
+        warn: false
 
-    - name: Bring up eth0 connection
-      nmcli:
-        conn_name: eth0
-        state: up
+    - name: Verify network configuration
+      ansible.builtin.shell: ip addr show eth0
+      register: eth0_status
+    - debug:
+        msg: "{{ eth0_status.stdout_lines }}"
 
-# =====================================================================
-# Register system and enable repositories
-# =====================================================================
-- name: Register system and enable RHEL repositories on VM
-  hosts: vms
-  gather_facts: yes
-  become: true
-
-  tasks:
+    # ============================================================
+    # STEP 2: Ensure subscription-manager is installed
+    # ============================================================
     - name: Ensure subscription-manager is installed
       package:
         name: subscription-manager
@@ -92,8 +86,8 @@
           --password='{{ rhsm_password }}' \
           --auto-attach
       register: register_result
-      retries: 3
-      delay: 10
+      retries: "{{ registration_retries }}"
+      delay: "{{ registration_delay }}"
       until: register_result.rc == 0
       no_log: true
 
