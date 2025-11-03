@@ -1,12 +1,12 @@
 ---
-- name: Prepare VM network and enable RHEL repositories
+- name: Prepare VM, configure network, and register RHEL repositories
   hosts: localhost
   gather_facts: false
 
   vars:
     vm_name: "apache-vm"
     vm_namespace: "vm-migration-test"
-    vm_ip: "10.0.0.118"          # Use exported VM IP from create-VM playbook
+    vm_ip: "10.0.0.118"          # Use the VM IP from create-VM playbook
     rhsm_username: "info@pacetechsystems.com"
     rhsm_password: "Silverado@8787!!!!"
     rhel_version: 9
@@ -14,9 +14,6 @@
       - rhel-9-for-x86_64-baseos-rpms
       - rhel-9-for-x86_64-appstream-rpms
       - codeready-builder-for-rhel-9-x86_64-rpms
-    google_dns:
-      - "8.8.8.8"
-      - "8.8.4.4"
 
   tasks:
     - name: Add VM to dynamic inventory
@@ -32,57 +29,39 @@
       debug:
         msg: "VM {{ vm_name }} ({{ vm_ip }}) added to dynamic group 'vms'"
 
-- name: Configure network and register system on VM
+- name: Configure network, register system, and enable repositories
   hosts: vms
   gather_facts: yes
   become: true
 
-  vars:
-    repos_to_enable:
-      - rhel-9-for-x86_64-baseos-rpms
-      - rhel-9-for-x86_64-appstream-rpms
-      - codeready-builder-for-rhel-9-x86_64-rpms
-    registration_retries: 3
-    registration_delay: 10
-
   tasks:
 
-    # -----------------------------
-    # Step 1: Configure network & DNS
-    # -----------------------------
-    - name: Ensure NetworkManager is installed
-      package:
-        name: NetworkManager
-        state: present
-
-    - name: Configure eth0 with DHCP and Google DNS
-      nmcli:
-        conn_name: eth0
-        ifname: eth0
-        type: ethernet
-        state: up
-        ipv4:
-          method: auto
-          dns: "{{ google_dns }}"
-          ignore_auto_dns: yes
-        ipv6:
-          method: ignore
-
-    - name: Restart NetworkManager to apply changes
-      service:
-        name: NetworkManager
-        state: restarted
-
-    - name: Verify connectivity
+    # --------------------------
+    # NETWORK CONFIGURATION
+    # --------------------------
+    - name: Ensure eth0 is up and using DHCP
       shell: |
-        ping -c 2 8.8.8.8 && ping -c 2 google.com
-      register: ping_test
-      failed_when: ping_test.rc != 0
-      changed_when: false
+        dhclient -v eth0 || true
+      args:
+        warn: false
 
-    # -----------------------------
-    # Step 2: Install subscription-manager
-    # -----------------------------
+    - name: Set Google DNS
+      copy:
+        dest: /etc/resolv.conf
+        content: |
+          nameserver 8.8.8.8
+          nameserver 8.8.4.4
+
+    - name: Test network connectivity
+      shell: ping -c 3 google.com
+      register: ping_result
+      retries: 5
+      delay: 5
+      until: ping_result.rc == 0
+
+    # --------------------------
+    # RHEL REGISTRATION
+    # --------------------------
     - name: Ensure subscription-manager is installed
       package:
         name: subscription-manager
@@ -102,8 +81,8 @@
           --password='{{ rhsm_password }}' \
           --auto-attach
       register: register_result
-      retries: "{{ registration_retries }}"
-      delay: "{{ registration_delay }}"
+      retries: 3
+      delay: 10
       until: register_result.rc == 0
       no_log: true
 
@@ -113,10 +92,7 @@
         state: present
         timeout: 60
 
-    # -----------------------------
-    # Step 3: Enable RHEL repositories
-    # -----------------------------
-    - name: Disable all repos (clean start)
+    - name: Disable all repositories (clean start)
       shell: subscription-manager repos --disable="*"
 
     - name: Enable required RHEL repositories
@@ -129,12 +105,12 @@
       args:
         creates: /etc/yum.repos.d/epel.repo
 
-    - name: Clean and refresh repo metadata
+    - name: Clean and refresh repository metadata
       shell: |
         dnf clean all
         dnf makecache
 
-    - name: Verify repository access
+    - name: Verify enabled repositories
       shell: dnf repolist enabled
       register: repolist
       changed_when: false
