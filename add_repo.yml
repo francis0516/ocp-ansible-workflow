@@ -1,5 +1,4 @@
 ---
-# Top-level variables (visible to all plays)
 vars:
   vm_name: apache-vm
   vm_gateway: "10.0.0.1"
@@ -16,7 +15,6 @@ vars:
   cloud_init_password: "password"
   ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
-# First play: prepare dynamic inventory
 - name: Prepare VM inventory from wait-for-SSH output
   hosts: localhost
   gather_facts: false
@@ -34,7 +32,6 @@ vars:
       debug:
         msg: "✅ Using VM IP from workflow: {{ vm_ip }}"
 
-# Second play: configure VM
 - name: Configure network, register system, and enable RHEL repositories
   hosts: dynamic_vms
   gather_facts: false
@@ -97,25 +94,4 @@ vars:
 
     - name: Enable required RHEL repositories
       shell: |
-        for repo in {{ repos_to_enable | join(' ') }}; do
-          if ! subscription-manager repos --list-enabled | grep -q "$repo"; then
-            subscription-manager repos --enable="$repo"
-          fi
-        done
-
-    - name: Install EPEL repository if not present
-      package:
-        name: "https://dl.fedoraproject.org/pub/epel/epel-release-latest-{{ rhel_version }}.noarch.rpm"
-        state: present
-
-    - name: Clean and refresh metadata
-      command: dnf makecache
-
-    - name: Verify enabled repositories
-      command: dnf repolist enabled
-      register: repo_list
-      changed_when: false
-
-    - name: Show final repo list
-      debug:
-        msg: "{{ repo_list.stdout_lines }}"
+        for repo in {{ r
