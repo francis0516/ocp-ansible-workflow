@@ -6,6 +6,7 @@
   vars:
     vm_name: "apache-vm"
     vm_namespace: "vm-migration-test"
+    vm_ip: "10.0.0.118"          # Use exported VM IP from create-VM playbook
     rhsm_username: "info@pacetechsystems.com"
     rhsm_password: "Silverado@8787!!!!"
     rhel_version: 9
@@ -13,32 +14,8 @@
       - rhel-9-for-x86_64-baseos-rpms
       - rhel-9-for-x86_64-appstream-rpms
       - codeready-builder-for-rhel-9-x86_64-rpms
-    registration_retries: 3
-    registration_delay: 10
-    guest_ip_retries: 20
-    guest_ip_delay: 15
 
   tasks:
-
-    - name: Wait for VM guest agent to report IPv4
-      command: >
-        oc get vmi {{ vm_name }} -n {{ vm_namespace }}
-        -o jsonpath='{.status.interfaces[0].ipAddresses[?(@ =~ "\d+\.\d+\.\d+\.\d+")]}'
-      register: vm_ip_result
-      retries: "{{ guest_ip_retries }}"
-      delay: "{{ guest_ip_delay }}"
-      until: vm_ip_result.stdout != ''
-      ignore_errors: false
-
-    - name: Set VM IPv4 fact
-      set_fact:
-        vm_ip: "{{ vm_ip_result.stdout }}"
-
-    - name: Fail if no IPv4 found
-      fail:
-        msg: "❌ No IPv4 address found for VM {{ vm_name }}. Guest agent may not be ready."
-      when: vm_ip == ''
-
     - name: Add VM to dynamic inventory
       add_host:
         name: "{{ vm_name }}"
@@ -47,6 +24,10 @@
         ansible_password: password
         ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
         groups: vms
+
+    - name: Display added VM info
+      debug:
+        msg: "VM {{ vm_name }} ({{ vm_ip }}) added to dynamic group 'vms'"
 
 - name: Register system and enable repositories on VM
   hosts: vms
@@ -62,7 +43,6 @@
     registration_delay: 10
 
   tasks:
-
     - name: Ensure subscription-manager is installed
       package:
         name: subscription-manager
