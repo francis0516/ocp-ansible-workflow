@@ -1,5 +1,5 @@
 ---
-- name: Prepare VM inventory from wait-for-SSH output
+- name: Prepare VM inventory from wait-for-SSH fact
   hosts: localhost
   gather_facts: false
   vars:
@@ -19,27 +19,18 @@
     ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
   tasks:
-    - name: Read VM IP from wait-for-SSH output file
-      slurp:
-        src: "/tmp/{{ vm_name }}_ip.txt"
-      register: vm_ip_file
-
-    - name: Set VM IP fact
-      set_fact:
-        vm_ip: "{{ vm_ip_file.content | b64decode | trim }}"
-
-    - name: Display VM IP
-      debug:
-        msg: "✅ Using VM IP from wait-for-SSH: {{ vm_ip }}"
-
-    - name: Add VM to in-memory inventory
+    - name: Add apache-vm to in-memory inventory
       add_host:
         name: "{{ vm_name }}"
-        ansible_host: "{{ vm_ip }}"
+        ansible_host: "{{ vm_ip }}"   # <-- use the vm_ip fact from wait-for-SSH
         ansible_user: root
         ansible_password: "{{ cloud_init_password }}"
         ansible_ssh_common_args: "{{ ansible_ssh_common_args }}"
         groups: dynamic_vms
+
+    - name: Display VM IP
+      debug:
+        msg: "✅ Using VM IP from wait-for-SSH: {{ vm_ip }}"
 
 - name: Configure network, register system, and enable RHEL repositories
   hosts: dynamic_vms
