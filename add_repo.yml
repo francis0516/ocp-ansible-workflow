@@ -1,11 +1,21 @@
 ---
-- name: Add VM to dynamic inventory
+- name: Configure network, register VM, and enable RHEL repositories
   hosts: localhost
   gather_facts: false
 
   vars:
     vm_name: "apache-vm"
+    vm_namespace: "vm-migration-test"
     vm_ip: "10.0.0.118"
+    vm_gateway: "10.0.0.1"
+    vm_dns: "8.8.8.8"
+    rhsm_username: "info@pacetechsystems.com"
+    rhsm_password: "Silverado@8787!!!!"
+    rhel_version: 9
+    repos_to_enable:
+      - rhel-9-for-x86_64-baseos-rpms
+      - rhel-9-for-x86_64-appstream-rpms
+      - codeready-builder-for-rhel-9-x86_64-rpms
 
   tasks:
     - name: Add VM to dynamic inventory
@@ -29,18 +39,12 @@
   gather_facts: true
 
   vars:
-    vm_ip: "10.0.0.118"
-    vm_gateway: "10.0.0.1"
-    vm_dns: "8.8.8.8"
-    registration_retries: 3
-    registration_delay: 10
-    rhsm_username: "info@pacetechsystems.com"
-    rhsm_password: "Silverado@8787!!!!"
-    rhel_version: 9
     repos_to_enable:
       - rhel-9-for-x86_64-baseos-rpms
       - rhel-9-for-x86_64-appstream-rpms
       - codeready-builder-for-rhel-9-x86_64-rpms
+    registration_retries: 3
+    registration_delay: 10
 
   tasks:
     - name: Ensure NetworkManager is installed
@@ -48,18 +52,21 @@
         name: NetworkManager
         state: present
 
-    - name: Configure static network for eth0
-      shell: |
-        nmcli con delete eth0 || true
-        nmcli con add type ethernet ifname eth0 con-name eth0 \
-          ipv4.addresses {{ vm_ip }}/24 \
-          ipv4.gateway {{ vm_gateway }} \
-          ipv4.dns {{ vm_dns }} \
-          ipv4.method manual \
-          autoconnect yes
-        nmcli con up eth0
-      args:
-        warn: false
+    - name: Delete existing eth0 connection if it exists
+      command: nmcli con delete eth0
+      ignore_errors: true
+
+    - name: Add eth0 static network connection
+      command: >
+        nmcli con add type ethernet ifname eth0 con-name eth0
+        ipv4.addresses {{ vm_ip }}/24
+        ipv4.gateway {{ vm_gateway }}
+        ipv4.dns {{ vm_dns }}
+        ipv4.method manual
+        autoconnect yes
+
+    - name: Bring up eth0 connection
+      command: nmcli con up eth0
 
     - name: Wait for internet connectivity
       wait_for:
@@ -84,7 +91,7 @@
         name: subscription-manager
         state: present
 
-    - name: Clean old RHSM registration if any
+    - name: Clean old registration if any
       shell: |
         subscription-manager remove --all || true
         subscription-manager unregister || true
@@ -124,6 +131,6 @@
       register: repo_list
       changed_when: false
 
-    - name: Display final repo list
+    - name: Show final repo list
       debug:
         msg: "{{ repo_list.stdout_lines }}"
