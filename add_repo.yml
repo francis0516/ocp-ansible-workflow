@@ -5,6 +5,7 @@
 
   vars:
     vm_name: "apache-vm"
+    vm_namespace: "vm-migration-test"
     vm_gateway: "10.0.0.1"
     vm_dns: "8.8.8.8"
     rhsm_username: "info@pacetechsystems.com"
@@ -14,42 +15,47 @@
       - rhel-9-for-x86_64-baseos-rpms
       - rhel-9-for-x86_64-appstream-rpms
       - codeready-builder-for-rhel-9-x86_64-rpms
+    max_ip_wait: 300
+    ip_poll_interval: 10
+    ssh_timeout: 300
+    ansible_ssh_common_args: '-o AddressFamily=inet -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
 
   tasks:
-    - name: Read VM IP from file
-      slurp:
-        src: "/tmp/{{ vm_name }}_ip.txt"
-      register: ip_file
+    - name: Fetch VM IPv4 from KubeVirt
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        namespace: "{{ vm_namespace }}"
+        name: "{{ vm_name }}"
+        validate_certs: no
+      register: vmi_info
+      until: 
+        - vmi_info.resources | length > 0
+        - vmi_info.resources[0].status.interfaces[0].ipAddress is defined
+      retries: "{{ max_ip_wait // ip_poll_interval }}"
+      delay: "{{ ip_poll_interval }}"
 
     - name: Set VM IP fact
       set_fact:
-        vm_ip: "{{ ip_file.content | b64decode | trim }}"
+        vm_ip: "{{ vmi_info.resources[0].status.interfaces[0].ipAddress }}"
 
     - name: Add VM to dynamic inventory
       add_host:
         name: "{{ vm_name }}"
         ansible_host: "{{ vm_ip }}"
         ansible_user: root
-        ansible_password: password
-        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+        ansible_password: "password"
+        ansible_ssh_common_args: "{{ ansible_ssh_common_args }}"
         groups: vms
 
     - name: Display added VM info
       debug:
         msg: "VM {{ vm_name }} ({{ vm_ip }}) added to dynamic group 'vms'"
 
-- name: Configure network, register RHEL system, and enable repos
+- name: Configure network and register RHEL system on VM
   hosts: vms
   become: true
   gather_facts: true
-
-  vars:
-    repos_to_enable:
-      - rhel-9-for-x86_64-baseos-rpms
-      - rhel-9-for-x86_64-appstream-rpms
-      - codeready-builder-for-rhel-9-x86_64-rpms
-    registration_retries: 3
-    registration_delay: 10
 
   tasks:
     - name: Ensure NetworkManager is installed
@@ -66,8 +72,16 @@
           ipv4.dns {{ vm_dns }} \
           ipv4.method manual autoconnect yes
         nmcli con up eth0
+      register: nmcli_result
 
-    - name: Test DNS resolution to google.com
+    - name: Wait for SSH port 22 to be available
+      wait_for:
+        host: "{{ vm_ip }}"
+        port: 22
+        timeout: "{{ ssh_timeout }}"
+        state: started
+
+    - name: Test DNS resolution
       command: ping -c 2 google.com
       register: ping_result
       ignore_errors: true
@@ -95,8 +109,8 @@
           --password='{{ rhsm_password }}' \
           --auto-attach
       register: register_result
-      retries: "{{ registration_retries }}"
-      delay: "{{ registration_delay }}"
+      retries: 3
+      delay: 10
       until: register_result.rc == 0
       no_log: false
 
