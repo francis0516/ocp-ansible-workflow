@@ -63,7 +63,8 @@
           ipv4.dns {{ vm_dns }} \
           ipv4.method manual autoconnect yes
         nmcli con up eth0
-      when: "'{{ ansible_host }}/24' not in eth0_ip.stdout"
+      when: ansible_host + '/24' not in eth0_ip.stdout
+
 
     - name: Test DNS resolution
       command: ping -c 2 google.com
