@@ -1,23 +1,25 @@
 ---
+# Top-level variables (visible to all plays)
+vars:
+  vm_name: apache-vm
+  vm_gateway: "10.0.0.1"
+  vm_dns: "8.8.8.8"
+  rhsm_username: "info@pacetechsystems.com"
+  rhsm_password: "Silverado@8787!!!!"
+  rhel_version: 9
+  repos_to_enable:
+    - rhel-9-for-x86_64-baseos-rpms
+    - rhel-9-for-x86_64-appstream-rpms
+    - codeready-builder-for-rhel-9-x86_64-rpms
+  registration_retries: 3
+  registration_delay: 10
+  cloud_init_password: "password"
+  ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+
+# First play: prepare dynamic inventory
 - name: Prepare VM inventory from wait-for-SSH output
   hosts: localhost
   gather_facts: false
-  vars:
-    vm_name: apache-vm
-    vm_gateway: "10.0.0.1"
-    vm_dns: "8.8.8.8"
-    rhsm_username: "info@pacetechsystems.com"
-    rhsm_password: "Silverado@8787!!!!"
-    rhel_version: 9
-    repos_to_enable:
-      - rhel-9-for-x86_64-baseos-rpms
-      - rhel-9-for-x86_64-appstream-rpms
-      - codeready-builder-for-rhel-9-x86_64-rpms
-    registration_retries: 3
-    registration_delay: 10
-    cloud_init_password: "password"
-    ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
-
   tasks:
     - name: Add apache-vm to in-memory inventory
       add_host:
@@ -28,10 +30,11 @@
         ansible_ssh_common_args: "{{ ansible_ssh_common_args }}"
         groups: dynamic_vms
 
-    - name: Display VM IP being used
+    - name: Display VM IP
       debug:
         msg: "✅ Using VM IP from workflow: {{ vm_ip }}"
 
+# Second play: configure VM
 - name: Configure network, register system, and enable RHEL repositories
   hosts: dynamic_vms
   gather_facts: false
@@ -41,7 +44,12 @@
         name: NetworkManager
         state: present
 
-    - name: Configure static network for eth0
+    - name: Check if eth0 already has correct IP
+      command: nmcli -g IP4.ADDRESS dev show eth0
+      register: eth0_ip
+      ignore_errors: true
+
+    - name: Configure static network for eth0 if IP not set
       shell: |
         nmcli con delete eth0 || true
         nmcli con add type ethernet ifname eth0 con-name eth0 \
@@ -50,6 +58,7 @@
           ipv4.dns {{ vm_dns }} \
           ipv4.method manual autoconnect yes
         nmcli con up eth0
+      when: "'{{ ansible_host }}/24' not in eth0_ip.stdout"
 
     - name: Test DNS resolution
       command: ping -c 2 google.com
@@ -65,22 +74,21 @@
         name: subscription-manager
         state: present
 
-    - name: Clean old registration if any
-      shell: |
-        subscription-manager remove --all || true
-        subscription-manager unregister || true
-        subscription-manager clean || true
+    - name: Check if system is already registered
+      shell: subscription-manager identity
+      register: subscription_status
       ignore_errors: true
 
-    - name: Register the system with Red Hat Subscription Manager
+    - name: Register system if not already registered
       shell: |
         subscription-manager register \
           --username='{{ rhsm_username }}' \
           --password='{{ rhsm_password }}' \
           --auto-attach
-      register: register_result
+      when: subscription_status.rc != 0
       retries: "{{ registration_retries }}"
       delay: "{{ registration_delay }}"
+      register: register_result
       until: register_result.rc == 0
       no_log: false
 
@@ -88,14 +96,17 @@
       command: subscription-manager repos --disable="*"
 
     - name: Enable required RHEL repositories
-      command: subscription-manager repos --enable="{{ item }}"
-      loop: "{{ repos_to_enable }}"
-
-    - name: Install EPEL repository
       shell: |
-        dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-{{ rhel_version }}.noarch.rpm
-      args:
-        creates: /etc/yum.repos.d/epel.repo
+        for repo in {{ repos_to_enable | join(' ') }}; do
+          if ! subscription-manager repos --list-enabled | grep -q "$repo"; then
+            subscription-manager repos --enable="$repo"
+          fi
+        done
+
+    - name: Install EPEL repository if not present
+      package:
+        name: "https://dl.fedoraproject.org/pub/epel/epel-release-latest-{{ rhel_version }}.noarch.rpm"
+        state: present
 
     - name: Clean and refresh metadata
       command: dnf makecache
