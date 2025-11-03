@@ -6,7 +6,7 @@
   vars:
     vm_name: "apache-vm"
     vm_namespace: "vm-migration-test"
-    vm_ip: "10.0.0.118"        # From the previous create VM playbook output
+    vm_ip: "10.0.0.118"
     rhsm_username: "info@pacetechsystems.com"
     rhsm_password: "Silverado@8787!!!!"
     rhel_version: 9
@@ -25,87 +25,84 @@
         ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
         groups: vms
 
-    - name: Display added VM info
-      debug:
-        msg: "VM {{ vm_name }} ({{ vm_ip }}) added to dynamic group 'vms'"
-
 # =======================================================================
-# SECOND PLAY - Configure network, register to Red Hat, and enable repos
+# SECOND PLAY - Network, DNS, Registration
 # =======================================================================
-- name: Configure network and register system on VM
+- name: Configure static IP, DNS, and register to Red Hat
   hosts: vms
   gather_facts: yes
   become: true
 
   vars:
-    repos_to_enable:
-      - rhel-9-for-x86_64-baseos-rpms
-      - rhel-9-for-x86_64-appstream-rpms
-      - codeready-builder-for-rhel-9-x86_64-rpms
+    static_ip: "10.0.0.118/24"
+    gateway: "10.0.0.1"
+    dns_servers: "8.8.8.8 8.8.4.4"
     registration_retries: 3
     registration_delay: 10
 
   tasks:
 
-    # =====================================================
-    # STEP 1: Network configuration and connectivity check
-    # =====================================================
+    # --- Ensure NetworkManager running ---
     - name: Ensure NetworkManager is installed and running
       package:
         name: NetworkManager
         state: present
 
-    - name: Ensure NetworkManager is enabled and started
+    - name: Start and enable NetworkManager
       systemd:
         name: NetworkManager
         state: started
         enabled: yes
 
-    - name: Configure eth0 for DHCP with Google DNS
+    # --- Configure static IP, gateway, and DNS ---
+    - name: Configure static IP and DNS on eth0
       shell: |
         nmcli con show eth0 >/dev/null 2>&1 || nmcli con add type ethernet ifname eth0 con-name eth0
-        nmcli con modify eth0 ipv4.method auto
-        nmcli con modify eth0 ipv4.dns "8.8.8.8 8.8.4.4"
-        nmcli con modify eth0 ipv4.ignore-auto-dns yes
+        nmcli con mod eth0 ipv4.addresses {{ static_ip }}
+        nmcli con mod eth0 ipv4.gateway {{ gateway }}
+        nmcli con mod eth0 ipv4.method manual
+        nmcli con mod eth0 ipv4.dns "{{ dns_servers }}"
+        nmcli con mod eth0 ipv4.ignore-auto-dns yes
         nmcli con up eth0
+      register: nmcli_output
 
-    - name: Wait until network is up (check for IPv4)
-      shell: |
-        ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' || true
-      register: ip_check
-      until: ip_check.stdout != ""
-      retries: 10
-      delay: 5
-
-    - name: Display detected IPv4 address
+    - name: Display network configuration summary
       debug:
-        msg: "✅ Detected eth0 IP: {{ ip_check.stdout }}"
+        msg: "{{ nmcli_output.stdout_lines | default([]) }}"
+
+    # --- Validate connectivity ---
+    - name: Wait for network link
+      shell: ping -c 2 8.8.8.8
+      register: ping_test
+      retries: 5
+      delay: 5
+      until: ping_test.rc == 0
 
     - name: Test DNS resolution to google.com
       shell: ping -c 2 google.com
       register: dns_test
-      ignore_errors: true
+      retries: 3
+      delay: 5
+      until: dns_test.rc == 0
 
-    - name: Display DNS status
+    - name: Display DNS test result
       debug:
-        msg: "{{ dns_test.stdout_lines | default(['❌ DNS not reachable — check DNS or gateway']) }}"
+        msg: "✅ DNS working fine: {{ dns_test.stdout_lines | default([]) }}"
 
-    # =====================================================
-    # STEP 2: Register system with Red Hat Subscription
-    # =====================================================
+    # --- Register to Red Hat ---
     - name: Ensure subscription-manager is installed
       package:
         name: subscription-manager
         state: present
 
-    - name: Unregister any existing registration
+    - name: Unregister existing system
       shell: |
         subscription-manager remove --all || true
         subscription-manager unregister || true
         subscription-manager clean || true
       ignore_errors: true
 
-    - name: Register the system with Red Hat Subscription Manager
+    - name: Register with Red Hat
       shell: |
         subscription-manager register \
           --username='{{ rhsm_username }}' \
@@ -123,10 +120,7 @@
         state: present
         timeout: 60
 
-    # =====================================================
-    # STEP 3: Enable Repositories
-    # =====================================================
-    - name: Disable all repos (clean start)
+    - name: Disable all repos
       shell: subscription-manager repos --disable="*"
 
     - name: Enable required RHEL repositories
@@ -139,7 +133,7 @@
       args:
         creates: /etc/yum.repos.d/epel.repo
 
-    - name: Clean and refresh repo metadata
+    - name: Clean and refresh repository metadata
       shell: |
         dnf clean all
         dnf makecache
