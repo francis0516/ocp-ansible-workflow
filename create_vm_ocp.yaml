@@ -128,7 +128,7 @@
 
     - name: Display VM creation result
       debug:
-        msg: "✓ VM {{ vm_name }} provisioned successfully"
+        msg: "VM {{ vm_name }} provisioned successfully"
       when: vm_creation.changed
 
     # ==========================================================================
@@ -150,7 +150,7 @@
 
     - name: Display DataVolume status
       debug:
-        msg: "✓ DataVolume ready (Phase: {{ dv_info.resources[0].status.phase }})"
+        msg: "DataVolume ready (Phase: {{ dv_info.resources[0].status.phase }})"
 
     # ==========================================================================
     # STEP 4: WAIT FOR VM TO BE RUNNING
@@ -171,7 +171,7 @@
 
     - name: Display VM running status
       debug:
-        msg: "✓ VM {{ vm_name }} is running, waiting for IPv4 address..."
+        msg: "VM {{ vm_name }} is running, waiting for IPv4 address..."
 
     # ==========================================================================
     # STEP 5: EXTRACT IPv4 ADDRESS (WITH FALLBACK)
@@ -230,7 +230,8 @@
 
         - name: Display guest agent extraction result
           debug:
-            msg: "{{ '✓' if vm_ipv4_addresses | length > 0 else '✗' }} Guest agent: {{ vm_ipv4_addresses if vm_ipv4_addresses | length > 0 else 'No IPv4 reported' }}"
+            msg: "Guest agent result: {{ vm_ipv4_addresses | join(', ') if vm_ipv4_addresses | length > 0 else 'No IPv4 reported' }}"
+          when: vm_ipv4_addresses is defined
 
         # ----------------------------------------------------------------------
         # METHOD 2: SSH Fallback (if guest agent failed)
@@ -277,7 +278,7 @@
 
             - name: Display SSH extraction result
               debug:
-                msg: "{{ '✓' if vm_ipv4_addresses | length > 0 else '✗' }} SSH extraction: {{ vm_ipv4_addresses if vm_ipv4_addresses | length > 0 else 'Failed' }}"
+                msg: "SSH extraction result: {{ vm_ipv4_addresses | join(', ') if vm_ipv4_addresses | length > 0 else 'Failed' }}"
 
         # ----------------------------------------------------------------------
         # Set final IPv4
@@ -378,7 +379,7 @@
           - "Password: {{ cloud_init_password }}"
           - "Network: {{ network_attachment }}"
           - "Guest Agent: {{ guest_agent_connected }}"
-          - "Detection Method: {{ 'Guest Agent ✓' if vmi_network_info.failed is not defined or not vmi_network_info.failed else 'SSH Fallback ⚠' }}"
+          - "Detection Method: {{ 'Guest Agent (Success)' if vmi_network_info.failed is not defined or not vmi_network_info.failed else 'SSH Fallback' }}"
           - ""
           - "Exported Variables:"
           - "  vm_ip: {{ vm_ip }}"
