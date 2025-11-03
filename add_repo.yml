@@ -1,12 +1,12 @@
 ---
-- name: Register VM, configure network, and enable RHEL repositories
+- name: Register VM and enable RHEL repositories
   hosts: localhost
   gather_facts: false
 
   vars:
     vm_name: "apache-vm"
     vm_namespace: "vm-migration-test"
-    vm_ip: "10.0.0.118"          # Use exported VM IP from create-VM playbook
+    vm_ip: "10.0.0.118"        # From the previous create VM playbook output
     rhsm_username: "info@pacetechsystems.com"
     rhsm_password: "Silverado@8787!!!!"
     rhel_version: 9
@@ -16,9 +16,6 @@
       - codeready-builder-for-rhel-9-x86_64-rpms
 
   tasks:
-    # ============================================================
-    # STEP 1: Add VM to dynamic inventory
-    # ============================================================
     - name: Add VM to dynamic inventory
       add_host:
         name: "{{ vm_name }}"
@@ -32,7 +29,10 @@
       debug:
         msg: "VM {{ vm_name }} ({{ vm_ip }}) added to dynamic group 'vms'"
 
-- name: Configure network, register system, and enable repositories on VM
+# =======================================================================
+# SECOND PLAY - Configure network, register to Red Hat, and enable repos
+# =======================================================================
+- name: Configure network and register system on VM
   hosts: vms
   gather_facts: yes
   become: true
@@ -46,27 +46,53 @@
     registration_delay: 10
 
   tasks:
-    # ============================================================
-    # STEP 1: Ensure network is configured
-    # ============================================================
+
+    # =====================================================
+    # STEP 1: Network configuration and connectivity check
+    # =====================================================
+    - name: Ensure NetworkManager is installed and running
+      package:
+        name: NetworkManager
+        state: present
+
+    - name: Ensure NetworkManager is enabled and started
+      systemd:
+        name: NetworkManager
+        state: started
+        enabled: yes
+
     - name: Configure eth0 for DHCP with Google DNS
-      ansible.builtin.shell: |
-        nmcli connection add type ethernet ifname eth0 con-name eth0 || true
-        nmcli connection modify eth0 ipv4.method auto
-        nmcli connection modify eth0 ipv4.dns "8.8.8.8 8.8.4.4"
-        nmcli connection up eth0
-      args:
-        warn: false
+      shell: |
+        nmcli con show eth0 >/dev/null 2>&1 || nmcli con add type ethernet ifname eth0 con-name eth0
+        nmcli con modify eth0 ipv4.method auto
+        nmcli con modify eth0 ipv4.dns "8.8.8.8 8.8.4.4"
+        nmcli con modify eth0 ipv4.ignore-auto-dns yes
+        nmcli con up eth0
 
-    - name: Verify network configuration
-      ansible.builtin.shell: ip addr show eth0
-      register: eth0_status
-    - debug:
-        msg: "{{ eth0_status.stdout_lines }}"
+    - name: Wait until network is up (check for IPv4)
+      shell: |
+        ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' || true
+      register: ip_check
+      until: ip_check.stdout != ""
+      retries: 10
+      delay: 5
 
-    # ============================================================
-    # STEP 2: Ensure subscription-manager is installed
-    # ============================================================
+    - name: Display detected IPv4 address
+      debug:
+        msg: "✅ Detected eth0 IP: {{ ip_check.stdout }}"
+
+    - name: Test DNS resolution to google.com
+      shell: ping -c 2 google.com
+      register: dns_test
+      ignore_errors: true
+
+    - name: Display DNS status
+      debug:
+        msg: "{{ dns_test.stdout_lines | default(['❌ DNS not reachable — check DNS or gateway']) }}"
+
+    # =====================================================
+    # STEP 2: Register system with Red Hat Subscription
+    # =====================================================
     - name: Ensure subscription-manager is installed
       package:
         name: subscription-manager
@@ -97,6 +123,9 @@
         state: present
         timeout: 60
 
+    # =====================================================
+    # STEP 3: Enable Repositories
+    # =====================================================
     - name: Disable all repos (clean start)
       shell: subscription-manager repos --disable="*"
 
