@@ -1,12 +1,10 @@
 ---
-- name: Prepare VM, configure network, and register RHEL repositories
-  hosts: localhost
-  gather_facts: false
+- name: Configure network and register VM with RHEL repositories
+  hosts: apache-vm
+  gather_facts: yes
+  become: true
 
   vars:
-    vm_name: "apache-vm"
-    vm_namespace: "vm-migration-test"
-    vm_ip: "10.0.0.118"          # Use the VM IP from create-VM playbook
     rhsm_username: "info@pacetechsystems.com"
     rhsm_password: "Silverado@8787!!!!"
     rhel_version: 9
@@ -14,54 +12,27 @@
       - rhel-9-for-x86_64-baseos-rpms
       - rhel-9-for-x86_64-appstream-rpms
       - codeready-builder-for-rhel-9-x86_64-rpms
-
-  tasks:
-    - name: Add VM to dynamic inventory
-      add_host:
-        name: "{{ vm_name }}"
-        ansible_host: "{{ vm_ip }}"
-        ansible_user: root
-        ansible_password: password
-        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
-        groups: vms
-
-    - name: Display added VM info
-      debug:
-        msg: "VM {{ vm_name }} ({{ vm_ip }}) added to dynamic group 'vms'"
-
-- name: Configure network, register system, and enable repositories
-  hosts: vms
-  gather_facts: yes
-  become: true
+    cloud_dns: "8.8.8.8"
 
   tasks:
 
-    # --------------------------
-    # NETWORK CONFIGURATION
-    # --------------------------
-    - name: Ensure eth0 is up and using DHCP
-      shell: |
-        dhclient -v eth0 || true
-      args:
-        warn: false
+    - name: Ensure eth0 interface is up and configured via DHCP
+      shell: dhclient -v eth0 || true
 
-    - name: Set Google DNS
-      copy:
-        dest: /etc/resolv.conf
-        content: |
-          nameserver 8.8.8.8
-          nameserver 8.8.4.4
+    - name: Ensure /etc/resolv.conf contains Google DNS
+      lineinfile:
+        path: /etc/resolv.conf
+        regexp: '^nameserver'
+        line: "nameserver {{ cloud_dns }}"
+        state: present
 
-    - name: Test network connectivity
-      shell: ping -c 3 google.com
+    - name: Verify network connectivity
+      command: ping -c 3 google.com
       register: ping_result
       retries: 5
       delay: 5
       until: ping_result.rc == 0
 
-    # --------------------------
-    # RHEL REGISTRATION
-    # --------------------------
     - name: Ensure subscription-manager is installed
       package:
         name: subscription-manager
@@ -92,7 +63,7 @@
         state: present
         timeout: 60
 
-    - name: Disable all repositories (clean start)
+    - name: Disable all repos (clean start)
       shell: subscription-manager repos --disable="*"
 
     - name: Enable required RHEL repositories
@@ -105,12 +76,12 @@
       args:
         creates: /etc/yum.repos.d/epel.repo
 
-    - name: Clean and refresh repository metadata
+    - name: Clean and refresh repo metadata
       shell: |
         dnf clean all
         dnf makecache
 
-    - name: Verify enabled repositories
+    - name: Verify repository access
       shell: dnf repolist enabled
       register: repolist
       changed_when: false
