@@ -1,6 +1,6 @@
 ---
-- name: Configure network, register VM, and enable RHEL repositories
-  hosts: all
+- name: Prepare VM inventory from wait-for-SSH output
+  hosts: localhost
   gather_facts: false
   vars:
     vm_name: apache-vm
@@ -18,14 +18,8 @@
     cloud_init_password: "password"
     ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
-  pre_tasks:
-    - name: Display VM IP received from previous playbook
-      delegate_to: localhost
-      debug:
-        msg: "✅ Using VM IP passed from workflow: {{ vm_ip }}"
-
+  tasks:
     - name: Add apache-vm to in-memory inventory
-      delegate_to: localhost
       add_host:
         name: "{{ vm_name }}"
         ansible_host: "{{ vm_ip }}"
@@ -34,7 +28,11 @@
         ansible_ssh_common_args: "{{ ansible_ssh_common_args }}"
         groups: dynamic_vms
 
-- name: Configure repositories inside VM
+    - name: Display VM IP being used
+      debug:
+        msg: "✅ Using VM IP from workflow: {{ vm_ip }}"
+
+- name: Configure network, register system, and enable RHEL repositories
   hosts: dynamic_vms
   gather_facts: false
   tasks:
@@ -52,7 +50,6 @@
           ipv4.dns {{ vm_dns }} \
           ipv4.method manual autoconnect yes
         nmcli con up eth0
-      register: nmcli_result
 
     - name: Test DNS resolution
       command: ping -c 2 google.com
