@@ -30,6 +30,12 @@
       set_fact:
         vm_ip: "{{ vmi_info.resources[0].status.interfaces[0].ipAddress }}"
 
+    - name: Save VM IP to file for other playbooks
+      copy:
+        content: "{{ vm_ip }}"
+        dest: "/tmp/{{ vm_name }}_ip.txt"
+        mode: '0644'
+
     - name: Wait for SSH port 22 to be available
       wait_for:
         host: "{{ vm_ip }}"
