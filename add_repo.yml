@@ -1,0 +1,149 @@
+---
+- name: Add VM to dynamic inventory
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    vm_name: "apache-vm"
+    vm_namespace: "vm-migration-test"
+    vm_gateway: "10.0.0.1"
+    vm_dns: "8.8.8.8"
+    rhsm_username: "info@pacetechsystems.com"
+    rhsm_password: "Silverado@8787!!!!"
+    rhel_version: 9
+    repos_to_enable:
+      - rhel-9-for-x86_64-baseos-rpms
+      - rhel-9-for-x86_64-appstream-rpms
+      - codeready-builder-for-rhel-9-x86_64-rpms
+    guest_ip_retries: 20
+    guest_ip_delay: 15
+
+  tasks:
+
+    - name: Wait for VM guest agent to report IPv4
+      command: >
+        oc get vmi {{ vm_name }} -n {{ vm_namespace }}
+        -o jsonpath='{.status.interfaces[0].ipAddresses[?(@ =~ "\d+\.\d+\.\d+\.\d+")]}'
+      register: vm_ip_result
+      retries: "{{ guest_ip_retries }}"
+      delay: "{{ guest_ip_delay }}"
+      until: vm_ip_result.stdout != ''
+      ignore_errors: false
+
+    - name: Set VM IPv4 fact
+      set_fact:
+        vm_ip: "{{ vm_ip_result.stdout }}"
+
+    - name: Fail if no IPv4 found
+      fail:
+        msg: "❌ No IPv4 address found for VM {{ vm_name }}. Guest agent may not be ready."
+      when: vm_ip == ''
+
+    - name: Add VM to dynamic inventory with variables
+      add_host:
+        name: "{{ vm_name }}"
+        ansible_host: "{{ vm_ip }}"
+        ansible_user: root
+        ansible_password: password
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+        groups: vms
+        vm_ip: "{{ vm_ip }}"
+        vm_gateway: "{{ vm_gateway }}"
+        vm_dns: "{{ vm_dns }}"
+        rhsm_username: "{{ rhsm_username }}"
+        rhsm_password: "{{ rhsm_password }}"
+        rhel_version: "{{ rhel_version }}"
+
+    - name: Display added VM info
+      debug:
+        msg: "VM {{ vm_name }} ({{ vm_ip }}) added to dynamic group 'vms'"
+
+# ---------------------------------------------------------------------------
+
+- name: Configure network, register VM, and enable RHEL repositories
+  hosts: vms
+  become: true
+  gather_facts: true
+
+  vars:
+    repos_to_enable:
+      - rhel-9-for-x86_64-baseos-rpms
+      - rhel-9-for-x86_64-appstream-rpms
+      - codeready-builder-for-rhel-9-x86_64-rpms
+    registration_retries: 3
+    registration_delay: 10
+
+  tasks:
+    - name: Ensure NetworkManager is installed
+      package:
+        name: NetworkManager
+        state: present
+
+    - name: Add eth0 static network connection
+      shell: |
+        nmcli con delete eth0 || true
+        nmcli con add type ethernet ifname eth0 con-name eth0 \
+          ipv4.addresses {{ vm_ip }}/24 \
+          ipv4.gateway {{ vm_gateway }} \
+          ipv4.dns {{ vm_dns }} \
+          ipv4.method manual autoconnect yes
+        nmcli con up eth0
+      register: nmcli_result
+
+    - name: Test DNS resolution to google.com
+      command: ping -c 2 google.com
+      register: ping_result
+      ignore_errors: true
+
+    - name: Display DNS test result
+      debug:
+        var: ping_result
+
+    - name: Ensure subscription-manager is installed
+      package:
+        name: subscription-manager
+        state: present
+
+    - name: Clean old registration if any
+      shell: |
+        subscription-manager remove --all || true
+        subscription-manager unregister || true
+        subscription-manager clean || true
+      ignore_errors: true
+
+    - name: Register the system with Red Hat Subscription Manager
+      shell: |
+        subscription-manager register \
+          --username='{{ rhsm_username }}' \
+          --password='{{ rhsm_password }}' \
+          --auto-attach
+      register: register_result
+      retries: "{{ registration_retries }}"
+      delay: "{{ registration_delay }}"
+      until: register_result.rc == 0
+      no_log: false
+
+    - name: Disable all repos (clean start)
+      command: subscription-manager repos --disable="*"
+
+    - name: Enable required RHEL repositories
+      command: subscription-manager repos --enable="{{ item }}"
+      loop: "{{ repos_to_enable }}"
+
+    - name: Install EPEL repository
+      shell: |
+        dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-{{ rhel_version }}.noarch.rpm
+      args:
+        creates: /etc/yum.repos.d/epel.repo
+
+    - name: Clean and refresh metadata
+      command: dnf makecache
+
+    - name: Verify enabled repositories
+      command: dnf repolist enabled
+      register: repo_list
+      changed_when: false
+
+    - name: Show final repo list
+      debug:
+        msg: "{{ repo_list.stdout_lines }}"
