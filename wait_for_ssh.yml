@@ -1,58 +1,88 @@
 ---
-- name: Wait for VM IPv4 and SSH readiness
-  hosts: localhost
-  gather_facts: false
+- name: Configure network, register VM, and enable RHEL repositories
+  hosts: vms
+  become: true
+  gather_facts: true
+
   vars:
-    vm_name: apache-vm
-    vm_project: vm-migration-test
-    cloud_init_password: password
-    max_ip_wait: 300       # total time to wait for IP
-    ip_poll_interval: 10   # seconds between polls
-    ssh_timeout: 300       # seconds for SSH wait
-    ansible_ssh_common_args: '-o AddressFamily=inet -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+    repos_to_enable:
+      - rhel-9-for-x86_64-baseos-rpms
+      - rhel-9-for-x86_64-appstream-rpms
+      - codeready-builder-for-rhel-9-x86_64-rpms
+    registration_retries: 3
+    registration_delay: 10
 
   tasks:
+    - name: Ensure NetworkManager is installed
+      package:
+        name: NetworkManager
+        state: present
 
-    - name: Poll VM for IPv4 address
-      kubernetes.core.k8s_info:
-        api_version: kubevirt.io/v1
-        kind: VirtualMachineInstance
-        namespace: "{{ vm_project }}"
-        name: "{{ vm_name }}"
-        validate_certs: no
-      register: vmi_info
-      until: 
-        - vmi_info.resources | length > 0
-        - vmi_info.resources[0].status.interfaces[0].ipAddress is defined
-      retries: "{{ max_ip_wait // ip_poll_interval }}"
-      delay: "{{ ip_poll_interval }}"
+    - name: Configure static network for eth0
+      shell: |
+        nmcli con delete eth0 || true
+        nmcli con add type ethernet ifname eth0 con-name eth0 \
+          ipv4.addresses {{ ansible_host }}/24 \
+          ipv4.gateway {{ vm_gateway }} \
+          ipv4.dns {{ vm_dns }} \
+          ipv4.method manual autoconnect yes
+        nmcli con up eth0
+      register: nmcli_result
 
-    - name: Set VM IP fact
-      set_fact:
-        vm_ip: "{{ vmi_info.resources[0].status.interfaces[0].ipAddress }}"
+    - name: Test DNS resolution to google.com
+      command: ping -c 2 google.com
+      register: ping_result
+      ignore_errors: true
 
-    - name: Wait for SSH port 22 to be available
-      wait_for:
-        host: "{{ vm_ip }}"
-        port: 22
-        timeout: "{{ ssh_timeout }}"
-        state: started
-
-    - name: Confirm VM IPv4 and SSH readiness
+    - name: Display DNS test result
       debug:
-        msg:
-          - "✅ VM IPv4 detected: {{ vm_ip }}"
-          - "✅ SSH port 22 is reachable on {{ vm_ip }}"
+        var: ping_result
 
-    - name: Add VM to dynamic in-memory inventory
-      add_host:
-        name: "target_vm_host"
-        ansible_host: "{{ vm_ip }}"
-        ansible_user: root
-        ansible_password: "{{ cloud_init_password }}"
-        ansible_ssh_common_args: "{{ ansible_ssh_common_args }}"
-        groups: vms
+    - name: Ensure subscription-manager is installed
+      package:
+        name: subscription-manager
+        state: present
 
-    - name: Display added VM info
+    - name: Clean old registration if any
+      shell: |
+        subscription-manager remove --all || true
+        subscription-manager unregister || true
+        subscription-manager clean || true
+      ignore_errors: true
+
+    - name: Register the system with Red Hat Subscription Manager
+      shell: |
+        subscription-manager register \
+          --username='{{ rhsm_username }}' \
+          --password='{{ rhsm_password }}' \
+          --auto-attach
+      register: register_result
+      retries: "{{ registration_retries }}"
+      delay: "{{ registration_delay }}"
+      until: register_result.rc == 0
+      no_log: false
+
+    - name: Disable all repos (clean start)
+      command: subscription-manager repos --disable="*"
+
+    - name: Enable required RHEL repositories
+      command: subscription-manager repos --enable="{{ item }}"
+      loop: "{{ repos_to_enable }}"
+
+    - name: Install EPEL repository
+      shell: |
+        dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-{{ rhel_version }}.noarch.rpm
+      args:
+        creates: /etc/yum.repos.d/epel.repo
+
+    - name: Clean and refresh metadata
+      command: dnf makecache
+
+    - name: Verify enabled repositories
+      command: dnf repolist enabled
+      register: repo_list
+      changed_when: false
+
+    - name: Show final repo list
       debug:
-        msg: "VM {{ vm_name }} ({{ vm_ip }}) added to dynamic group 'vms' for next tasks"
+        msg: "{{ repo_list.stdout_lines }}"
