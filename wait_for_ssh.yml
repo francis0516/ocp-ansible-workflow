@@ -1,19 +1,16 @@
-- name: Wait for VM IPv4, configure network, and register repos
+---
+- name: Wait for VM IPv4 and SSH readiness
   hosts: localhost
   gather_facts: false
   vars:
-    vm_name: apache-vm
-    vm_project: vm-migration-test
-    cloud_init_password: password
-    vm_gateway: "10.0.0.1"
-    vm_dns: "8.8.8.8"
-    rhsm_username: "info@pacetechsystems.com"
-    rhsm_password: "Silverado@8787!!!!"
-    rhel_version: 9
-    max_ip_wait: 300
-    ip_poll_interval: 10
-    ssh_timeout: 300
+    vm_name: "apache-vm"
+    vm_project: "vm-migration-test"
+    cloud_init_password: "password"
+    max_ip_wait: 300       # total seconds to wait for IP
+    ip_poll_interval: 10   # seconds between polls
+    ssh_timeout: 300       # seconds for SSH wait
     ansible_ssh_common_args: '-o AddressFamily=inet -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+    ip_file_path: "/tmp/{{ vm_name }}_ip.txt"
 
   tasks:
 
@@ -25,7 +22,7 @@
         name: "{{ vm_name }}"
         validate_certs: no
       register: vmi_info
-      until: 
+      until:
         - vmi_info.resources | length > 0
         - vmi_info.resources[0].status.interfaces[0].ipAddress is defined
       retries: "{{ max_ip_wait // ip_poll_interval }}"
@@ -35,6 +32,11 @@
       set_fact:
         vm_ip: "{{ vmi_info.resources[0].status.interfaces[0].ipAddress }}"
 
+    - name: Fail if no IP found
+      fail:
+        msg: "❌ VM {{ vm_name }} did not report an IPv4. Check guest agent."
+      when: vm_ip is not defined
+
     - name: Wait for SSH port 22 to be available
       wait_for:
         host: "{{ vm_ip }}"
@@ -42,33 +44,27 @@
         timeout: "{{ ssh_timeout }}"
         state: started
 
-    - name: Add VM to dynamic inventory
+    - name: Confirm VM IPv4 and SSH readiness
+      debug:
+        msg:
+          - "✅ VM IPv4 detected: {{ vm_ip }}"
+          - "✅ SSH port 22 is reachable on {{ vm_ip }}"
+
+    - name: Add VM to dynamic in-memory inventory
       add_host:
-        name: "{{ vm_name }}"
+        name: "target_vm_host"
         ansible_host: "{{ vm_ip }}"
         ansible_user: root
         ansible_password: "{{ cloud_init_password }}"
         ansible_ssh_common_args: "{{ ansible_ssh_common_args }}"
         groups: vms
-        vm_gateway: "{{ vm_gateway }}"
-        vm_dns: "{{ vm_dns }}"
-        rhsm_username: "{{ rhsm_username }}"
-        rhsm_password: "{{ rhsm_password }}"
-        rhel_version: "{{ rhel_version }}"
 
-- name: Configure network, register VM, and enable RHEL repositories
-  hosts: vms
-  become: true
-  gather_facts: true
+    - name: Write VM IP to temporary file for add-repo playbook
+      copy:
+        content: "{{ vm_ip }}"
+        dest: "{{ ip_file_path }}"
+        mode: '0644'
 
-  vars:
-    registration_retries: 3
-    registration_delay: 10
-
-  tasks:
-    - name: Ensure NetworkManager is installed
-      package:
-        name: NetworkManager
-        state: present
-
-    # ... rest of your add-repo tasks here ...
+    - name: Display added VM info
+      debug:
+        msg: "VM {{ vm_name }} ({{ vm_ip }}) added to dynamic group 'vms' and saved to {{ ip_file_path }}"
