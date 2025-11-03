@@ -16,12 +16,16 @@
       - codeready-builder-for-rhel-9-x86_64-rpms
 
   tasks:
-    - name: Ensure VM IP fact exists
-      fail:
-        msg: "❌ VM IP is not defined. Make sure wait-for-SSH playbook has run first."
-      when: vm_ip is not defined
+    - name: Read VM IP from wait-for-SSH output file
+      slurp:
+        src: "/tmp/{{ vm_name }}_ip.txt"
+      register: vm_ip_file
 
-    - name: Add VM to dynamic in-memory inventory
+    - name: Set VM IP fact
+      set_fact:
+        vm_ip: "{{ vm_ip_file.content | b64decode | trim }}"
+
+    - name: Add VM to dynamic inventory with all required variables
       add_host:
         name: "{{ vm_name }}"
         ansible_host: "{{ vm_ip }}"
@@ -34,10 +38,11 @@
         rhsm_username: "{{ rhsm_username }}"
         rhsm_password: "{{ rhsm_password }}"
         rhel_version: "{{ rhel_version }}"
+        repos_to_enable: "{{ repos_to_enable }}"   # Pass the list explicitly here
 
     - name: Display added VM info
       debug:
-        msg: "✅ VM {{ vm_name }} ({{ vm_ip }}) added to dynamic group 'vms'"
+        msg: "VM {{ vm_name }} ({{ vm_ip }}) added to dynamic group 'vms'"
 
 # ---------------------------------------------------------------------------
 
@@ -101,7 +106,7 @@
 
     - name: Enable required RHEL repositories
       command: subscription-manager repos --enable="{{ item }}"
-      loop: "{{ repos_to_enable }}"
+      loop: "{{ repos_to_enable }}"   # Now this variable exists on the host
 
     - name: Install EPEL repository
       shell: |
