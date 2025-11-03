@@ -1,5 +1,5 @@
 ---
-- name: Add VM to dynamic inventory
+- name: Configure network, register VM, and enable RHEL repositories dynamically
   hosts: localhost
   gather_facts: false
 
@@ -30,7 +30,7 @@
       until: vm_ip_result.stdout != ''
       ignore_errors: false
 
-    - name: Set VM IPv4 fact
+    - name: Set VM IPv4 fact dynamically
       set_fact:
         vm_ip: "{{ vm_ip_result.stdout }}"
 
@@ -39,7 +39,7 @@
         msg: "❌ No IPv4 address found for VM {{ vm_name }}. Guest agent may not be ready."
       when: vm_ip == ''
 
-    - name: Add VM to dynamic inventory with variables
+    - name: Add VM to dynamic inventory
       add_host:
         name: "{{ vm_name }}"
         ansible_host: "{{ vm_ip }}"
@@ -47,12 +47,6 @@
         ansible_password: password
         ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
         groups: vms
-        vm_ip: "{{ vm_ip }}"
-        vm_gateway: "{{ vm_gateway }}"
-        vm_dns: "{{ vm_dns }}"
-        rhsm_username: "{{ rhsm_username }}"
-        rhsm_password: "{{ rhsm_password }}"
-        rhel_version: "{{ rhel_version }}"
 
     - name: Display added VM info
       debug:
@@ -60,18 +54,10 @@
 
 # ---------------------------------------------------------------------------
 
-- name: Configure network, register VM, and enable RHEL repositories
+- name: Configure network, register, and enable repositories on VM
   hosts: vms
   become: true
   gather_facts: true
-
-  vars:
-    repos_to_enable:
-      - rhel-9-for-x86_64-baseos-rpms
-      - rhel-9-for-x86_64-appstream-rpms
-      - codeready-builder-for-rhel-9-x86_64-rpms
-    registration_retries: 3
-    registration_delay: 10
 
   tasks:
     - name: Ensure NetworkManager is installed
@@ -79,7 +65,7 @@
         name: NetworkManager
         state: present
 
-    - name: Add eth0 static network connection
+    - name: Configure static network for eth0
       shell: |
         nmcli con delete eth0 || true
         nmcli con add type ethernet ifname eth0 con-name eth0 \
@@ -118,8 +104,8 @@
           --password='{{ rhsm_password }}' \
           --auto-attach
       register: register_result
-      retries: "{{ registration_retries }}"
-      delay: "{{ registration_delay }}"
+      retries: 3
+      delay: 10
       until: register_result.rc == 0
       no_log: false
 
