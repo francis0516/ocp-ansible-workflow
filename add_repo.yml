@@ -1,10 +1,10 @@
 ---
 - name: Configure network, register VM, and enable RHEL repositories
-  hosts: vms
-  become: true
-  gather_facts: true
+  hosts: localhost
+  gather_facts: false
 
   vars:
+    vm_name: "apache-vm"
     vm_gateway: "10.0.0.1"
     vm_dns: "8.8.8.8"
     rhsm_username: "info@pacetechsystems.com"
@@ -16,21 +16,56 @@
       - codeready-builder-for-rhel-9-x86_64-rpms
 
   tasks:
+    - name: Read VM IP from file
+      slurp:
+        src: "/tmp/{{ vm_name }}_ip.txt"
+      register: ip_file
+
+    - name: Set VM IP fact
+      set_fact:
+        vm_ip: "{{ ip_file.content | b64decode | trim }}"
+
+    - name: Add VM to dynamic inventory
+      add_host:
+        name: "{{ vm_name }}"
+        ansible_host: "{{ vm_ip }}"
+        ansible_user: root
+        ansible_password: password
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+        groups: vms
+
+    - name: Display added VM info
+      debug:
+        msg: "VM {{ vm_name }} ({{ vm_ip }}) added to dynamic group 'vms'"
+
+- name: Configure network, register RHEL system, and enable repos
+  hosts: vms
+  become: true
+  gather_facts: true
+
+  vars:
+    repos_to_enable:
+      - rhel-9-for-x86_64-baseos-rpms
+      - rhel-9-for-x86_64-appstream-rpms
+      - codeready-builder-for-rhel-9-x86_64-rpms
+    registration_retries: 3
+    registration_delay: 10
+
+  tasks:
     - name: Ensure NetworkManager is installed
       package:
         name: NetworkManager
         state: present
 
-    - name: Configure static network for eth0 using vm_ip from wait-for-SSH
+    - name: Configure static network for eth0
       shell: |
         nmcli con delete eth0 || true
         nmcli con add type ethernet ifname eth0 con-name eth0 \
-          ipv4.addresses {{ ansible_host }}/24 \
+          ipv4.addresses {{ vm_ip }}/24 \
           ipv4.gateway {{ vm_gateway }} \
           ipv4.dns {{ vm_dns }} \
           ipv4.method manual autoconnect yes
         nmcli con up eth0
-      register: nmcli_result
 
     - name: Test DNS resolution to google.com
       command: ping -c 2 google.com
@@ -60,8 +95,8 @@
           --password='{{ rhsm_password }}' \
           --auto-attach
       register: register_result
-      retries: 3
-      delay: 10
+      retries: "{{ registration_retries }}"
+      delay: "{{ registration_delay }}"
       until: register_result.rc == 0
       no_log: false
 
