@@ -1,5 +1,5 @@
 ---
-- name: Configure network, register VM, and enable RHEL repositories
+- name: Add VM to dynamic inventory
   hosts: localhost
   gather_facts: false
 
@@ -18,7 +18,7 @@
       - codeready-builder-for-rhel-9-x86_64-rpms
 
   tasks:
-    - name: Add VM to dynamic inventory
+    - name: Add VM to dynamic inventory with variables
       add_host:
         name: "{{ vm_name }}"
         ansible_host: "{{ vm_ip }}"
@@ -26,12 +26,12 @@
         ansible_password: password
         ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
         groups: vms
-        # Pass network & RHSM variables to the host
         vm_ip: "{{ vm_ip }}"
         vm_gateway: "{{ vm_gateway }}"
         vm_dns: "{{ vm_dns }}"
         rhsm_username: "{{ rhsm_username }}"
         rhsm_password: "{{ rhsm_password }}"
+        rhel_version: "{{ rhel_version }}"
 
     - name: Display added VM info
       debug:
@@ -39,7 +39,7 @@
 
 # ---------------------------------------------------------------------------
 
-- name: Configure network and register RHEL system
+- name: Configure network, register VM, and enable RHEL repositories
   hosts: vms
   become: true
   gather_facts: true
@@ -58,30 +58,18 @@
         name: NetworkManager
         state: present
 
-    - name: Delete existing eth0 connection if it exists
-      command: nmcli con delete eth0
-      ignore_errors: true
-
     - name: Add eth0 static network connection
-      command: >
-        nmcli con add type ethernet ifname eth0 con-name eth0
-        ipv4.addresses {{ vm_ip }}/24
-        ipv4.gateway {{ vm_gateway }}
-        ipv4.dns {{ vm_dns }}
-        ipv4.method manual
-        autoconnect yes
+      shell: |
+        nmcli con delete eth0 || true
+        nmcli con add type ethernet ifname eth0 con-name eth0 \
+          ipv4.addresses {{ vm_ip }}/24 \
+          ipv4.gateway {{ vm_gateway }} \
+          ipv4.dns {{ vm_dns }} \
+          ipv4.method manual autoconnect yes
+        nmcli con up eth0
+      register: nmcli_result
 
-    - name: Bring up eth0 connection
-      command: nmcli con up eth0
-
-    - name: Wait for internet connectivity
-      wait_for:
-        host: google.com
-        port: 80
-        timeout: 30
-        state: started
-
-    - name: Test DNS resolution
+    - name: Test DNS resolution to google.com
       command: ping -c 2 google.com
       register: ping_result
       ignore_errors: true
@@ -89,8 +77,6 @@
     - name: Display DNS test result
       debug:
         var: ping_result
-
-# ---------------------------------------------------------------------------
 
     - name: Ensure subscription-manager is installed
       package:
