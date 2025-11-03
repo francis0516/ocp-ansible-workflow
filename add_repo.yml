@@ -90,7 +90,8 @@
         subscription-manager register \
           --username='{{ rhsm_username }}' \
           --password='{{ rhsm_password }}' \
-          --auto-attach
+          --auto-attach \
+          --force
       when: subscription_status.rc != 0
       retries: "{{ registration_retries }}"
       delay: "{{ registration_delay }}"
