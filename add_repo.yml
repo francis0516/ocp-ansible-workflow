@@ -1,5 +1,5 @@
 ---
-- name: Configure network, register VM, and enable RHEL repositories
+- name: Add VM to dynamic inventory using IP from wait-for-SSH
   hosts: localhost
   gather_facts: false
 
@@ -15,47 +15,45 @@
       - rhel-9-for-x86_64-baseos-rpms
       - rhel-9-for-x86_64-appstream-rpms
       - codeready-builder-for-rhel-9-x86_64-rpms
-    max_ip_wait: 300
-    ip_poll_interval: 10
-    ssh_timeout: 300
-    ansible_ssh_common_args: '-o AddressFamily=inet -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
 
   tasks:
-    - name: Fetch VM IPv4 from KubeVirt
-      kubernetes.core.k8s_info:
-        api_version: kubevirt.io/v1
-        kind: VirtualMachineInstance
-        namespace: "{{ vm_namespace }}"
-        name: "{{ vm_name }}"
-        validate_certs: no
-      register: vmi_info
-      until: 
-        - vmi_info.resources | length > 0
-        - vmi_info.resources[0].status.interfaces[0].ipAddress is defined
-      retries: "{{ max_ip_wait // ip_poll_interval }}"
-      delay: "{{ ip_poll_interval }}"
+    - name: Read VM IP from file
+      slurp:
+        src: "/tmp/{{ vm_name }}_ip.txt"
+      register: vm_ip_file
 
     - name: Set VM IP fact
       set_fact:
-        vm_ip: "{{ vmi_info.resources[0].status.interfaces[0].ipAddress }}"
+        vm_ip: "{{ vm_ip_file.content | b64decode | trim }}"
 
     - name: Add VM to dynamic inventory
       add_host:
         name: "{{ vm_name }}"
         ansible_host: "{{ vm_ip }}"
         ansible_user: root
-        ansible_password: "password"
-        ansible_ssh_common_args: "{{ ansible_ssh_common_args }}"
+        ansible_password: password
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
         groups: vms
+        vm_gateway: "{{ vm_gateway }}"
+        vm_dns: "{{ vm_dns }}"
+        rhsm_username: "{{ rhsm_username }}"
+        rhsm_password: "{{ rhsm_password }}"
+        rhel_version: "{{ rhel_version }}"
 
     - name: Display added VM info
       debug:
         msg: "VM {{ vm_name }} ({{ vm_ip }}) added to dynamic group 'vms'"
 
-- name: Configure network and register RHEL system on VM
+# ---------------------------------------------------------------------------
+
+- name: Configure network, register VM, and enable RHEL repositories
   hosts: vms
   become: true
   gather_facts: true
+
+  vars:
+    registration_retries: 3
+    registration_delay: 10
 
   tasks:
     - name: Ensure NetworkManager is installed
@@ -63,7 +61,7 @@
         name: NetworkManager
         state: present
 
-    - name: Configure static network for eth0
+    - name: Add eth0 static network connection
       shell: |
         nmcli con delete eth0 || true
         nmcli con add type ethernet ifname eth0 con-name eth0 \
@@ -74,14 +72,7 @@
         nmcli con up eth0
       register: nmcli_result
 
-    - name: Wait for SSH port 22 to be available
-      wait_for:
-        host: "{{ vm_ip }}"
-        port: 22
-        timeout: "{{ ssh_timeout }}"
-        state: started
-
-    - name: Test DNS resolution
+    - name: Test DNS resolution to google.com
       command: ping -c 2 google.com
       register: ping_result
       ignore_errors: true
@@ -109,8 +100,8 @@
           --password='{{ rhsm_password }}' \
           --auto-attach
       register: register_result
-      retries: 3
-      delay: 10
+      retries: "{{ registration_retries }}"
+      delay: "{{ registration_delay }}"
       until: register_result.rc == 0
       no_log: false
 
