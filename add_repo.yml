@@ -5,7 +5,7 @@
   vars:
     vm_name: apache-vm
     vm_gateway: "10.0.0.1"
-    vm_dns: "8.8.8.8"
+    vm_dns: "8.8.8.8, 10.0.0.17"
     rhsm_username: "info@pacetechsystems.com"
     rhsm_password: "Silverado@8787!!!!"
     rhel_version: 9
@@ -57,8 +57,8 @@
       set_fact:
         primary_iface: "{{ nmcli_devices.stdout_lines | select('search', 'connected') | map('split', ':') | map('first') | list | first | default('eth0') }}"
 
-    - name: Configure static network for primary interface
-      nmcli:
+    - name: Configure persistent static network for primary interface
+      community.general.nmcli:
         conn_name: "{{ primary_iface }}"
         ifname: "{{ primary_iface }}"
         type: ethernet
@@ -70,6 +70,10 @@
 
     - name: Bring up the primary interface
       command: nmcli con up "{{ primary_iface }}"
+
+    - name: Wait a few seconds for network to stabilize
+      wait_for:
+        timeout: 5
 
     - name: Test DNS resolution
       command: ping -c 2 google.com
