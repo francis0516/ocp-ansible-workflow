@@ -13,54 +13,50 @@
 
   tasks:
 
+    - name: Ensure KUBECONFIG is set
+      set_fact:
+        kube_env:
+          KUBECONFIG: "{{ kubeconfig_path }}"
+
     - name: Get VM information
-      community.kubernetes.k8s_info:
-        api_version: kubevirt.io/v1
-        kind: VirtualMachine
-        name: "{{ vm_name }}"
-        namespace: "{{ vm_namespace }}"
+      command: >
+        oc get vm {{ vm_name }} -n {{ vm_namespace }} -o json
       register: vm_info
-      failed_when: vm_info.resources | length == 0
-      environment:
-        KUBECONFIG: "{{ kubeconfig_path }}"
+      failed_when: vm_info.rc != 0
+      environment: "{{ kube_env }}"
 
     - name: Get VMI information
-      community.kubernetes.k8s_info:
-        api_version: kubevirt.io/v1
-        kind: VirtualMachineInstance
-        name: "{{ vm_name }}"
-        namespace: "{{ vm_namespace }}"
+      command: >
+        oc get vmi {{ vm_name }} -n {{ vm_namespace }} -o json
       register: vmi_info
       retries: "{{ retries }}"
       delay: "{{ delay }}"
-      until: vmi_info.resources | length > 0
-      environment:
-        KUBECONFIG: "{{ kubeconfig_path }}"
+      until: vmi_info.rc == 0
+      environment: "{{ kube_env }}"
 
-    - name: Fetch VM IP (first IPv4)
+    - name: Fetch VM IP (first IPv4) from VMI JSON
       set_fact:
-        vm_ip: "{{ (vmi_info.resources[0].status.interfaces | selectattr('ipAddresses','defined') | list)[0].ipAddresses[0] }}"
-      when: vmi_info.resources | length > 0
+        vm_ip: "{{ (vmi_info.stdout | from_json).status.interfaces[0].ip }}"
+      when: vmi_info.stdout is defined
 
     - name: Ensure Route exists
-      community.kubernetes.k8s:
-        api_version: route.openshift.io/v1
+      command: >
+        oc apply -f - <<EOF
+        apiVersion: route.openshift.io/v1
         kind: Route
-        namespace: "{{ vm_namespace }}"
-        name: "{{ route_name }}"
-        state: present
-        definition:
-          spec:
-            to:
-              kind: Service
-              name: "{{ service_name }}"
-            port:
-              targetPort: http
-            tls:
-              termination: edge
-      register: route_result
-      environment:
-        KUBECONFIG: "{{ kubeconfig_path }}"
+        metadata:
+          name: {{ route_name }}
+          namespace: {{ vm_namespace }}
+        spec:
+          to:
+            kind: Service
+            name: {{ service_name }}
+          port:
+            targetPort: http
+          tls:
+            termination: edge
+        EOF
+      environment: "{{ kube_env }}"
 
     - name: Wait for route to be admitted
       command: >
@@ -69,14 +65,13 @@
       retries: "{{ retries }}"
       delay: "{{ delay }}"
       until: route_status.stdout == "True"
-      environment:
-        KUBECONFIG: "{{ kubeconfig_path }}"
+      environment: "{{ kube_env }}"
 
     - name: Fetch Route hostname
-      command: oc get route {{ route_name }} -n {{ vm_namespace }} -o jsonpath='{.spec.host}'
+      command: >
+        oc get route {{ route_name }} -n {{ vm_namespace }} -o jsonpath='{.spec.host}'
       register: route_hostname
-      environment:
-        KUBECONFIG: "{{ kubeconfig_path }}"
+      environment: "{{ kube_env }}"
 
     - name: Display VM and Route info
       debug:
