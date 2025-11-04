@@ -2,11 +2,13 @@
 - hosts: localhost
   gather_facts: false
   environment:
-    KUBECONFIG: /etc/kubernetes/static-pod-resources/kube-apiserver-certs/secrets/node-kubeconfigs/localhost.kubeconfig   # Ensures all kubectl/oc/k8s tasks work
+    KUBECONFIG: /etc/kubernetes/static-pod-resources/kube-apiserver-certs/secrets/node-kubeconfigs/localhost.kubeconfig
 
   vars:
     default_vm_name: "apache-vm"
     default_vm_namespace: "vm-migration-test"
+    retries: 5
+    delay: 5
 
   tasks:
 
@@ -15,46 +17,26 @@
         vm_name: "{{ vm_name | default(default_vm_name) }}"
         vm_namespace: "{{ vm_namespace | default(default_vm_namespace) }}"
 
-    - name: Verify access to cluster
-      command: oc cluster-info
-      register: cluster_info
-      changed_when: false
-
-    - name: Display cluster info
-      debug:
-        msg: "{{ cluster_info.stdout }}"
-
     - name: Get VM information
-      kubernetes.core.k8s_info:
-        api_version: kubevirt.io/v1
-        kind: VirtualMachine
-        name: "{{ vm_name }}"
-        namespace: "{{ vm_namespace }}"
+      command: "oc get vmi {{ vm_name }} -n {{ vm_namespace }} -o json"
       register: vm_info
-      ignore_errors: yes
+      failed_when: vm_info.rc != 0
 
     - name: Fail if VM does not exist
       fail:
         msg: "❌ VM '{{ vm_name }}' not found in namespace '{{ vm_namespace }}'."
-      when: (vm_info.resources | default([])) | length == 0
+      when: vm_info.stdout | from_json | length == 0
 
     - name: Fetch VM IPv4 from first interface with IPv4
       set_fact:
-        vm_ipv4: >-
-          {{
-            (vm_info.resources[0].status.interfaces
-              | selectattr('ipAddresses', 'defined')
-              | map(attribute='ipAddresses')
-              | map('select', 'match', '^\\d+\\.\\d+\\.\\d+\\.\\d+$')
-              | list
-              | first
-            )
-          }}
-      when: (vm_info.resources | length > 0) and (vm_info.resources[0].status.interfaces is defined)
+        vm_ip: "{{ (vm_info.stdout | from_json).status.interfaces | selectattr('ip', 'defined') | map(attribute='ip') | select('match','^\\d+\\.\\d+\\.\\d+\\.\\d+$') | first }}"
+      retries: "{{ retries }}"
+      delay: "{{ delay }}"
+      until: vm_ip is defined
 
-    - name: Display fetched VM IPv4
+    - name: Debug VM IP
       debug:
-        msg: "✅ VM IPv4: {{ vm_ipv4 | default('N/A') }}"
+        msg: "✅ VM IPv4 detected: {{ vm_ip }}"
 
     - name: Create Service for Apache VM
       kubernetes.core.k8s:
@@ -76,30 +58,6 @@
                 port: 80
                 targetPort: 80
             type: ClusterIP
-
-    - name: Verify Service endpoints
-      kubernetes.core.k8s_info:
-        api_version: v1
-        kind: Endpoints
-        name: "{{ vm_name }}-service"
-        namespace: "{{ vm_namespace }}"
-      register: service_endpoints
-
-    - name: Display Service endpoint status
-      debug:
-        msg: "Service Endpoints: {{ (service_endpoints.resources | default([{}]))[0].subsets | default([]) }}"
-      when:
-        - (service_endpoints.resources | default([])) | length > 0
-        - (service_endpoints.resources[0].subsets is defined)
-        - (service_endpoints.resources[0].subsets | length > 0)
-
-    - name: Display warning if no endpoints found
-      debug:
-        msg: "⚠ Warning: No endpoints found! Check if VM selector matches."
-      when:
-        - (service_endpoints.resources | default([])) | length == 0 or
-          service_endpoints.resources[0].subsets is not defined or
-          service_endpoints.resources[0].subsets | length == 0
 
     - name: Create Route for Apache VM
       kubernetes.core.k8s:
@@ -124,24 +82,16 @@
               insecureEdgeTerminationPolicy: Redirect
             wildcardPolicy: None
 
-    - name: Wait for Route to be ready
+    - name: Wait for Route to be admitted
       kubernetes.core.k8s_info:
         api_version: route.openshift.io/v1
         kind: Route
         name: "{{ vm_name }}-route"
         namespace: "{{ vm_namespace }}"
       register: route_info
-      until: (route_info.resources | default([{}]))[0].spec.host is defined
       retries: 10
       delay: 5
-
-    - name: Get Route status details
-      kubernetes.core.k8s_info:
-        api_version: route.openshift.io/v1
-        kind: Route
-        name: "{{ vm_name }}-route"
-        namespace: "{{ vm_namespace }}"
-      register: route_status
+      until: route_info.resources[0].status.ingress is defined and route_info.resources[0].status.ingress[0].conditions[0].status == "True"
 
     - name: Display deployment information
       debug:
@@ -149,14 +99,14 @@
           - "==========================================================================="
           - "✅ Henogez WebServer Route Created Successfully!"
           - "==========================================================================="
-          - "   External URL (HTTPS): https://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
-          - "   External URL (HTTP - will redirect): http://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
-          - "   Internal VM IP: http://{{ vm_ipv4 | default('N/A') }}"
+          - "   Internal VM IP: http://{{ vm_ip }}"
           - "   Internal Service: http://{{ vm_name }}-service.{{ vm_namespace }}.svc.cluster.local"
+          - "   External URL (HTTPS): https://{{ route_info.resources[0].spec.host }}"
+          - "   External URL (HTTP - will redirect): http://{{ route_info.resources[0].spec.host }}"
           - "   Resource Details:"
           - "   VM Name: {{ vm_name }}"
           - "   Namespace: {{ vm_namespace }}"
           - "   Service: {{ vm_name }}-service"
           - "   Route: {{ vm_name }}-route"
-          - "   Route Status: Admitted: {{ (route_status.resources | default([{}]))[0].status.ingress[0].conditions[0].status | default('Unknown') }}"
+          - "   Route Status: Admitted: {{ route_info.resources[0].status.ingress[0].conditions[0].status }}"
           - "==========================================================================="
