@@ -3,12 +3,14 @@
   hosts: localhost
   connection: local
   gather_facts: false
+  environment:
+    # Use your valid external kubeconfig
+    KUBECONFIG: "/etc/kubernetes/static-pod-resources/kube-apiserver-certs/secrets/node-kubeconfigs/lb-ext.kubeconfig"
+    PATH: "/usr/local/bin:/usr/bin:/bin"
 
   vars:
     vm_name: apache-vm
     vm_namespace: vm-migration-test
-    svc_port: 80
-    target_port: 80
 
   tasks:
     - name: Ensure oc CLI is available
@@ -17,25 +19,29 @@
       failed_when: oc_check.rc != 0
       changed_when: false
 
-    - name: Ensure KUBECONFIG is set
-      environment:
-        KUBECONFIG: "{{ lookup('env', 'KUBECONFIG') | default('~/.kube/config', true) }}"
+    - name: Check OpenShift authentication
       ansible.builtin.command: oc whoami
-      register: whoami_result
+      register: oc_user
+      failed_when: oc_user.rc != 0
       changed_when: false
 
-    - name: Display OpenShift user
+    - name: Display current OpenShift user
       debug:
-        msg: "Logged in as: {{ whoami_result.stdout }}"
+        msg: "Authenticated as: {{ oc_user.stdout }}"
 
-    - name: Ensure target namespace exists
-      kubernetes.core.k8s:
-        state: present
-        definition:
-          apiVersion: v1
-          kind: Namespace
-          metadata:
-            name: "{{ vm_namespace }}"
+    - name: Get VM information
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_namespace }}"
+      register: vm_info
+      ignore_errors: yes
+
+    - name: Display VM labels for debugging
+      debug:
+        msg: "VM Labels: {{ vm_info.resources[0].metadata.labels }}"
+      when: vm_info.resources | length > 0
 
     - name: Create Service for Apache VM
       kubernetes.core.k8s:
@@ -50,17 +56,38 @@
               app: "{{ vm_name }}"
           spec:
             selector:
-              app: "{{ vm_name }}"
+              vm.kubevirt.io/name: "{{ vm_name }}"
             ports:
-              - protocol: TCP
-                port: "{{ svc_port }}"
-                targetPort: "{{ target_port }}"
-                name: http
+              - name: http
+                protocol: TCP
+                port: 80
+                targetPort: 80
+            type: ClusterIP
 
-    - name: Get OpenShift router domain
-      command: oc get ingresscontroller default -n openshift-ingress-operator -o jsonpath='{.status.domain}'
-      register: ingress_domain
-      changed_when: false
+    - name: Verify Service endpoints
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Endpoints
+        name: "{{ vm_name }}-service"
+        namespace: "{{ vm_namespace }}"
+      register: service_endpoints
+
+    - name: Display Service endpoint status
+      debug:
+        msg: 
+          - "Service Endpoints: {{ service_endpoints.resources[0].subsets | default([]) }}"
+      when: 
+        - service_endpoints.resources | length > 0
+        - service_endpoints.resources[0].subsets is defined
+        - service_endpoints.resources[0].subsets | length > 0
+
+    - name: Display warning if no endpoints found
+      debug:
+        msg: "Warning: No endpoints found! Check if VM selector matches."
+      when: 
+        - service_endpoints.resources | length == 0 or 
+          service_endpoints.resources[0].subsets is not defined or
+          service_endpoints.resources[0].subsets | length == 0
 
     - name: Create Route for Apache VM
       kubernetes.core.k8s:
@@ -74,7 +101,6 @@
             labels:
               app: "{{ vm_name }}"
           spec:
-            host: "{{ vm_name }}-{{ vm_namespace }}.{{ ingress_domain.stdout }}"
             to:
               kind: Service
               name: "{{ vm_name }}-service"
@@ -86,22 +112,49 @@
               insecureEdgeTerminationPolicy: Redirect
             wildcardPolicy: None
 
-    - name: Retrieve Route details
-      command: oc get route {{ vm_name }}-route -n {{ vm_namespace }} -o jsonpath='{.spec.host}'
-      register: route_host
-      changed_when: false
+    - name: Wait for Route to be ready
+      kubernetes.core.k8s_info:
+        api_version: route.openshift.io/v1
+        kind: Route
+        name: "{{ vm_name }}-route"
+        namespace: "{{ vm_namespace }}"
+      register: route_info
+      until: route_info.resources[0].spec.host is defined
+      retries: 10
+      delay: 3
 
-    - name: Display Route information
+    - name: Get Route status details
+      kubernetes.core.k8s_info:
+        api_version: route.openshift.io/v1
+        kind: Route
+        name: "{{ vm_name }}-route"
+        namespace: "{{ vm_namespace }}"
+      register: route_status
+
+    - name: Display deployment information
       debug:
         msg:
-          - "🌐 Application Route Created Successfully!"
+          - "==========================================================================="
+          - "Henogez WebServer Route Created Successfully!"
+          - "==========================================================================="
+          - "   Access your web server at:"
           - ""
-          - "🔹 Namespace: {{ vm_namespace }}"
-          - "🔹 Service: {{ vm_name }}-service"
-          - "🔹 Route: {{ vm_name }}-route"
+          - "   External URL (HTTPS): https://{{ route_info.resources[0].spec.host }}"
+          - "   External URL (HTTP - will redirect): http://{{ route_info.resources[0].spec.host }}"
           - ""
-          - "✅ External HTTPS URL:"
-          - "https://{{ route_host.stdout }}"
+          - "   Internal Service URL: http://{{ vm_name }}-service.{{ vm_namespace }}.svc.cluster.local"
           - ""
-          - "To test it:"
-          - "curl -k https://{{ route_host.stdout }}"
+          - "   Resource Details:"
+          - "   VM Name: {{ vm_name }}"
+          - "   Namespace: {{ vm_namespace }}"
+          - "   Service: {{ vm_name }}-service"
+          - "   Route: {{ vm_name }}-route"
+          - ""
+          - "   Route Status: Admitted: {{ route_status.resources[0].status.ingress[0].conditions[0].status | default('Unknown') }}"
+          - ""
+          - "   Troubleshooting Commands:"
+          - "   oc get svc {{ vm_name }}-service -n {{ vm_namespace }}"
+          - "   oc get endpoints {{ vm_name }}-service -n {{ vm_namespace }}"
+          - "   oc get route {{ vm_name }}-route -n {{ vm_namespace }}"
+          - "   curl -k https://{{ route_info.resources[0].spec.host }}"
+          - "==========================================================================="
