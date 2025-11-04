@@ -1,41 +1,59 @@
 ---
-- hosts: localhost
+- name: Create Route for Apache VM with dynamic cluster domain
+  hosts: localhost
   gather_facts: false
-
   vars:
-    default_vm_name: "apache-vm"
-    default_vm_namespace: "vm-migration-test"
-    retries: 10
-    delay: 5
-    kubeconfig_path: "/etc/kubernetes/static-pod-resources/kube-apiserver-certs/secrets/node-kubeconfigs/localhost.kubeconfig"
-
+    vm_name: apache-vm
+    vm_namespace: vm-migration-test
+    kubeconfig_path: "/home/hogege/kubeconfig"   # Adjust as needed
+    retries: 5
+    delay: 10
   tasks:
-
-    - name: Set effective VM name and namespace
-      set_fact:
-        vm_name: "{{ vm_name | default(default_vm_name) }}"
-        vm_namespace: "{{ vm_namespace | default(default_vm_namespace) }}"
 
     - name: Ensure KUBECONFIG is set
       ansible.builtin.shell: "export KUBECONFIG={{ kubeconfig_path }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
       changed_when: false
 
-    - name: Get VM information
-      kubernetes.core.k8s_info:
-        api_version: kubevirt.io/v1
-        kind: VirtualMachine
-        name: "{{ vm_name }}"
+    - name: Fetch OpenShift cluster domain
+      community.kubernetes.k8s_info:
+        kind: Ingress
+        namespace: openshift-ingress
+      register: ingress_info
+      retries: "{{ retries }}"
+      delay: "{{ delay }}"
+      until: ingress_info.resources | length > 0
+
+    - name: Set cluster domain fact
+      set_fact:
+        cluster_domain: "{{ ingress_info.resources[0].spec.domain }}"
+
+    - name: Get VMI information
+      community.kubernetes.k8s_info:
+        kind: VirtualMachineInstance
         namespace: "{{ vm_namespace }}"
-      register: vm_info
-      ignore_errors: yes
+        name: "{{ vm_name }}"
+      register: vmi_info
+      retries: "{{ retries }}"
+      delay: "{{ delay }}"
+      until: vmi_info.resources | length > 0
 
     - name: Fail if VM does not exist
-      fail:
-        msg: "❌ VM '{{ vm_name }}' not found in namespace '{{ vm_namespace }}'."
-      when: (vm_info.resources | default([])) | length == 0
+      ansible.builtin.fail:
+        msg: "The VM {{ vm_name }} does not exist in namespace {{ vm_namespace }}."
+      when: vmi_info.resources | length == 0
 
-    - name: Create Service for Apache VM
-      kubernetes.core.k8s:
+    - name: Fetch VM IP from VMI status
+      set_fact:
+        vm_ip: "{{ vmi_info.resources[0].status.interfaces[0].ip | default('') }}"
+      failed_when: vm_ip == ""
+      retries: "{{ retries }}"
+      delay: "{{ delay }}"
+      until: vm_ip != ""
+
+    - name: Create Service (ClusterIP) if not exists
+      community.kubernetes.k8s:
         state: present
         definition:
           apiVersion: v1
@@ -43,32 +61,18 @@
           metadata:
             name: "{{ vm_name }}-service"
             namespace: "{{ vm_namespace }}"
-            labels:
-              app: "{{ vm_name }}"
           spec:
             selector:
+              kubevirt.io/domain: "{{ vm_name }}"
               vm.kubevirt.io/name: "{{ vm_name }}"
             ports:
-              - name: http
-                protocol: TCP
+              - protocol: TCP
                 port: 80
                 targetPort: 80
             type: ClusterIP
 
-    - name: Wait until the Service has at least one endpoint
-      kubernetes.core.k8s_info:
-        api_version: v1
-        kind: Endpoints
-        name: "{{ vm_name }}-service"
-        namespace: "{{ vm_namespace }}"
-      register: service_endpoints
-      retries: "{{ retries }}"
-      delay: "{{ delay }}"
-      until: (service_endpoints.resources | default([{}]))[0].subsets is defined and
-             (service_endpoints.resources | default([{}]))[0].subsets | length > 0
-
-    - name: Create Route for Apache VM
-      kubernetes.core.k8s:
+    - name: Create Route for Apache VM using dynamic cluster domain
+      community.kubernetes.k8s:
         state: present
         definition:
           apiVersion: route.openshift.io/v1
@@ -79,6 +83,7 @@
             labels:
               app: "{{ vm_name }}"
           spec:
+            host: "{{ vm_name }}-route-{{ vm_namespace }}.{{ cluster_domain }}"
             to:
               kind: Service
               name: "{{ vm_name }}-service"
@@ -90,29 +95,26 @@
               insecureEdgeTerminationPolicy: Redirect
             wildcardPolicy: None
 
-    - name: Wait for Route to be ready
-      kubernetes.core.k8s_info:
-        api_version: route.openshift.io/v1
+    - name: Wait for Route to be admitted
+      community.kubernetes.k8s_info:
         kind: Route
-        name: "{{ vm_name }}-route"
         namespace: "{{ vm_namespace }}"
+        name: "{{ vm_name }}-route"
       register: route_info
       retries: "{{ retries }}"
       delay: "{{ delay }}"
-      until: (route_info.resources | default([{}]))[0].spec.host is defined
+      until: route_info.resources[0].status.ingress[0].conditions[0].type == "Admitted"
 
-    - name: Display Route URL and VM details
-      debug:
+    - name: Display VM and Route Details
+      ansible.builtin.debug:
         msg:
-          - "==========================================================================="
-          - "✅ Henogez WebServer Route Created Successfully!"
-          - "==========================================================================="
-          - "   External URL (HTTPS): https://{{ (route_info.resources | default([{}]))[0].spec.host }}"
-          - "   External URL (HTTP - will redirect): http://{{ (route_info.resources | default([{}]))[0].spec.host }}"
-          - "   Internal Service: http://{{ vm_name }}-service.{{ vm_namespace }}.svc.cluster.local"
-          - "   Resource Details:"
-          - "   VM Name: {{ vm_name }}"
-          - "   Namespace: {{ vm_namespace }}"
-          - "   Service: {{ vm_name }}-service"
-          - "   Route: {{ vm_name }}-route"
-          - "==========================================================================="
+          - "External URL (HTTPS): https://{{ vm_name }}-route-{{ vm_namespace }}.{{ cluster_domain }}"
+          - "External URL (HTTP - will redirect): http://{{ vm_name }}-route-{{ vm_namespace }}.{{ cluster_domain }}"
+          - "Internal Service: http://{{ vm_name }}-service.{{ vm_namespace }}.svc.cluster.local"
+          - "Internal VM IP: http://{{ vm_ip }}"
+          - "Resource Details:"
+          - "VM Name: {{ vm_name }}"
+          - "Namespace: {{ vm_namespace }}"
+          - "Service: {{ vm_name }}-service"
+          - "Route: {{ vm_name }}-route"
+          - "✅ Route Status: Admitted: True"
