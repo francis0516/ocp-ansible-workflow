@@ -1,3 +1,4 @@
+---
 - hosts: localhost
   gather_facts: false
 
@@ -34,29 +35,24 @@
         namespace: "{{ vm_namespace }}"
       register: vmi_info
 
-    - name: Debug VMI info
-      debug:
-        var: vmi_info
-
-    - name: Fetch VM IPv4 from first interface with IPv4
+    - name: Fetch VM IPv4 from first interface with IPv4 (safe)
       set_fact:
         vm_ip: >-
           {{ (vmi_info.resources[0].status.interfaces
+               | default([]) 
                | selectattr('ipAddresses','defined')
                | map(attribute='ipAddresses')
                | sum(start=[])
                | select('match','^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$')
-               | list)[0] }}
-      when: (vmi_info.resources | length > 0) and
-            (vmi_info.resources[0].status.interfaces is defined)
+               | list
+              )[0] | default('0.0.0.0') }}
+      when: (vmi_info.resources | length > 0)
 
-    - name: Display fetched VM IPv4
+    - name: Debug VM IPv4
       debug:
         msg: "VM IPv4 Address: {{ vm_ip }}"
+      failed_when: vm_ip == '0.0.0.0'
 
-    # -------------------------------
-    # Service creation now uses vm_ip if needed
-    # -------------------------------
     - name: Create Service for Apache VM
       kubernetes.core.k8s:
         state: present
@@ -78,7 +74,31 @@
                 targetPort: 80
             type: ClusterIP
 
-    - name: Create Route for Apache VM
+    - name: Verify Service endpoints
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Endpoints
+        name: "{{ vm_name }}-service"
+        namespace: "{{ vm_namespace }}"
+      register: service_endpoints
+
+    - name: Display Service endpoint status
+      debug:
+        msg: "Service Endpoints: {{ (service_endpoints.resources | default([{}]))[0].subsets | default([]) }}"
+      when:
+        - (service_endpoints.resources | default([])) | length > 0
+        - (service_endpoints.resources[0].subsets is defined)
+        - (service_endpoints.resources[0].subsets | length > 0)
+
+    - name: Display warning if no endpoints found
+      debug:
+        msg: "⚠ Warning: No endpoints found! Check if VM selector matches."
+      when:
+        - (service_endpoints.resources | default([])) | length == 0 or
+          service_endpoints.resources[0].subsets is not defined or
+          service_endpoints.resources[0].subsets | length == 0
+
+    - name: Create Route for Apache VM using VM IPv4
       kubernetes.core.k8s:
         state: present
         definition:
@@ -96,7 +116,45 @@
               weight: 100
             port:
               targetPort: http
+            host: "{{ vm_ip }}"   # Use the fetched IPv4
             tls:
               termination: edge
               insecureEdgeTerminationPolicy: Redirect
             wildcardPolicy: None
+
+    - name: Wait for Route to be ready
+      kubernetes.core.k8s_info:
+        api_version: route.openshift.io/v1
+        kind: Route
+        name: "{{ vm_name }}-route"
+        namespace: "{{ vm_namespace }}"
+      register: route_info
+      until: (route_info.resources | default([{}]))[0].spec.host is defined
+      retries: 10
+      delay: 2
+
+    - name: Get Route status details
+      kubernetes.core.k8s_info:
+        api_version: route.openshift.io/v1
+        kind: Route
+        name: "{{ vm_name }}-route"
+        namespace: "{{ vm_namespace }}"
+      register: route_status
+
+    - name: Display deployment information
+      debug:
+        msg:
+          - "==========================================================================="
+          - "✅ Henogez WebServer Route Created Successfully!"
+          - "==========================================================================="
+          - "   Access your web server at:"
+          - "   External URL (HTTPS): https://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
+          - "   External URL (HTTP - will redirect): http://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
+          - "   Internal Service: http://{{ vm_name }}-service.{{ vm_namespace }}.svc.cluster.local"
+          - "   Resource Details:"
+          - "   VM Name: {{ vm_name }}"
+          - "   Namespace: {{ vm_namespace }}"
+          - "   Service: {{ vm_name }}-service"
+          - "   Route: {{ vm_name }}-route"
+          - "   Route Status: Admitted: {{ (route_status.resources | default([{}]))[0].status.ingress[0].conditions[0].status | default('Unknown') }}"
+          - "==========================================================================="
