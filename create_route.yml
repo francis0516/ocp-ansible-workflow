@@ -70,7 +70,7 @@
           kind: Route
           metadata:
             name: "{{ vm_name | default('apache-vm') }}-route"
-            namespace: "{{ vm_namespace | default('vm-migratio-test') }}"
+            namespace: "{{ vm_namespace | default('vm-migration-test') }}"
             labels:
               app: "{{ vm_name | default('apache-vm') }}"
           spec:
