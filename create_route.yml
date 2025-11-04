@@ -1,120 +1,63 @@
 ---
-- name: Create Route for Apache VM with dynamic cluster domain
+- name: Create Route and Fetch VM Details
   hosts: localhost
   gather_facts: false
   vars:
     vm_name: apache-vm
     vm_namespace: vm-migration-test
-    kubeconfig_path: "/home/hogege/kubeconfig"   # Adjust as needed
-    retries: 5
+    retries: 10
     delay: 10
+
   tasks:
 
     - name: Ensure KUBECONFIG is set
-      ansible.builtin.shell: "export KUBECONFIG={{ kubeconfig_path }}"
-      environment:
-        KUBECONFIG: "{{ kubeconfig_path }}"
-      changed_when: false
-
-    - name: Fetch OpenShift cluster domain
-      community.kubernetes.k8s_info:
-        kind: Ingress
-        namespace: openshift-ingress
-      register: ingress_info
-      retries: "{{ retries }}"
-      delay: "{{ delay }}"
-      until: ingress_info.resources | length > 0
-
-    - name: Set cluster domain fact
-      set_fact:
-        cluster_domain: "{{ ingress_info.resources[0].spec.domain }}"
-
-    - name: Get VMI information
-      community.kubernetes.k8s_info:
-        kind: VirtualMachineInstance
-        namespace: "{{ vm_namespace }}"
-        name: "{{ vm_name }}"
-      register: vmi_info
-      retries: "{{ retries }}"
-      delay: "{{ delay }}"
-      until: vmi_info.resources | length > 0
+      ansible.builtin.set_fact:
+        ansible_env:
+          KUBECONFIG: /home/hogege/kubeconfig  # <-- Update path as needed
 
     - name: Fail if VM does not exist
-      ansible.builtin.fail:
-        msg: "The VM {{ vm_name }} does not exist in namespace {{ vm_namespace }}."
-      when: vmi_info.resources | length == 0
+      ansible.builtin.command: >
+        oc get vm {{ vm_name }} -n {{ vm_namespace }}
+      register: vm_check
+      failed_when: vm_check.rc != 0
+      changed_when: false
 
-    - name: Fetch VM IP from VMI status
-      set_fact:
-        vm_ip: "{{ vmi_info.resources[0].status.interfaces[0].ip | default('') }}"
-      failed_when: vm_ip == ""
+    - name: Get VMI IP via oc
+      ansible.builtin.command: >
+        oc get vmi {{ vm_name }} -n {{ vm_namespace }} -o jsonpath='{.status.interfaces[0].ip}'
+      register: vm_ip
       retries: "{{ retries }}"
       delay: "{{ delay }}"
-      until: vm_ip != ""
+      until: vm_ip.stdout != ""
+      changed_when: false
 
-    - name: Create Service (ClusterIP) if not exists
-      community.kubernetes.k8s:
-        state: present
-        definition:
-          apiVersion: v1
-          kind: Service
-          metadata:
-            name: "{{ vm_name }}-service"
-            namespace: "{{ vm_namespace }}"
-          spec:
-            selector:
-              kubevirt.io/domain: "{{ vm_name }}"
-              vm.kubevirt.io/name: "{{ vm_name }}"
-            ports:
-              - protocol: TCP
-                port: 80
-                targetPort: 80
-            type: ClusterIP
-
-    - name: Create Route for Apache VM using dynamic cluster domain
-      community.kubernetes.k8s:
-        state: present
-        definition:
-          apiVersion: route.openshift.io/v1
-          kind: Route
-          metadata:
-            name: "{{ vm_name }}-route"
-            namespace: "{{ vm_namespace }}"
-            labels:
-              app: "{{ vm_name }}"
-          spec:
-            host: "{{ vm_name }}-route-{{ vm_namespace }}.{{ cluster_domain }}"
-            to:
-              kind: Service
-              name: "{{ vm_name }}-service"
-              weight: 100
-            port:
-              targetPort: http
-            tls:
-              termination: edge
-              insecureEdgeTerminationPolicy: Redirect
-            wildcardPolicy: None
-
-    - name: Wait for Route to be admitted
-      community.kubernetes.k8s_info:
-        kind: Route
-        namespace: "{{ vm_namespace }}"
-        name: "{{ vm_name }}-route"
-      register: route_info
+    - name: Get OpenShift cluster domain via oc
+      ansible.builtin.command: >
+        oc get ingresses.config/cluster -o jsonpath='{.spec.domain}'
+      register: cluster_domain
       retries: "{{ retries }}"
       delay: "{{ delay }}"
-      until: route_info.resources[0].status.ingress[0].conditions[0].type == "Admitted"
+      until: cluster_domain.stdout != ""
+      changed_when: false
+
+    - name: Get route hostname
+      ansible.builtin.command: >
+        oc get route {{ vm_name }}-route -n {{ vm_namespace }} -o jsonpath='{.spec.host}'
+      register: route_host
+      retries: "{{ retries }}"
+      delay: "{{ delay }}"
+      until: route_host.stdout != ""
+      changed_when: false
 
     - name: Display VM and Route Details
       ansible.builtin.debug:
         msg:
-          - "External URL (HTTPS): https://{{ vm_name }}-route-{{ vm_namespace }}.{{ cluster_domain }}"
-          - "External URL (HTTP - will redirect): http://{{ vm_name }}-route-{{ vm_namespace }}.{{ cluster_domain }}"
+          - "External URL (HTTPS): https://{{ route_host.stdout }}"
+          - "External URL (HTTP - will redirect): http://{{ route_host.stdout }}"
+          - "Internal VM IP: http://{{ vm_ip.stdout }}"
           - "Internal Service: http://{{ vm_name }}-service.{{ vm_namespace }}.svc.cluster.local"
-          - "Internal VM IP: http://{{ vm_ip }}"
           - "Resource Details:"
-          - "VM Name: {{ vm_name }}"
-          - "Namespace: {{ vm_namespace }}"
-          - "Service: {{ vm_name }}-service"
-          - "Route: {{ vm_name }}-route"
-          - "✅ Route Status: Admitted: True"
+          - "  VM Name: {{ vm_name }}"
+          - "  Namespace: {{ vm_namespace }}"
+          - "  Service: {{ vm_name }}-service"
+          - "  Route: {{ vm_name }}-route"
