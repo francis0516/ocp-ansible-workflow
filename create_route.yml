@@ -1,12 +1,12 @@
 ---
-- name: Create Route for VM Service and Verify Access
+- name: Create OpenShift Route for VM and Verify Application
   hosts: localhost
   gather_facts: false
   vars:
     vm_name: apache-vm
     vm_namespace: vm-migration-test
-    service_name: apache-vm-service
     route_name: apache-vm-route
+    service_name: apache-vm-service
     max_retries: 10
     retry_delay: 10
 
@@ -17,82 +17,76 @@
         effective_namespace: "{{ vm_namespace }}"
 
     - name: Get VM information
-      command: >
-        oc get vm {{ effective_vm_name }}
-        -n {{ effective_namespace }}
-        -o json
+      command: oc get vm {{ effective_vm_name }} -n {{ effective_namespace }} -o json
       register: vm_info
+      changed_when: false
       failed_when: vm_info.rc != 0
-      changed_when: false
 
-    - name: Fetch VM IPv4
-      set_fact:
-        vm_ip: "{{ vm_info.stdout | from_json | json_query('status.interfaces[0].ipAddress') | default('') }}"
-      when: vm_info.stdout | from_json | json_query('status.interfaces') is defined
-
-    - name: Ensure VM IPv4 was found
+    - name: Fail if VM does not exist
       fail:
-        msg: "Unable to determine IPv4 address for VM {{ effective_vm_name }}"
-      when: vm_ip == ""
+        msg: "VM {{ effective_vm_name }} not found in namespace {{ effective_namespace }}"
+      when: vm_info.rc != 0
 
-    - name: Ensure Service exists
-      command: >
-        oc get svc {{ service_name }} -n {{ effective_namespace }}
-      register: svc_check
-      failed_when: svc_check.rc != 0
+    - name: Fetch VM IPv4 from VMI status
+      command: oc get vmi {{ effective_vm_name }} -n {{ effective_namespace }} -o json
+      register: vmi_info
       changed_when: false
+      retries: 10
+      delay: 10
+      until: vmi_info.stdout | from_json | json_query('status.interfaces[0].ipAddress') is defined
 
-    - name: Check if Route already exists
-      command: >
-        oc get route {{ route_name }} -n {{ effective_namespace }} -o jsonpath='{.spec.host}'
-      register: route_host
-      ignore_errors: true
-      changed_when: false
+    - name: Set VM IPv4 fact
+      set_fact:
+        vm_ipv4: "{{ (vmi_info.stdout | from_json).status.interfaces[0].ipAddress }}"
 
-    - name: Delete route if host is an internal IP
-      command: oc delete route {{ route_name }} -n {{ effective_namespace }}
-      when: route_host.stdout is match("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$")
-      ignore_errors: true
+    - name: Ensure Service exists for VM
+      shell: |
+        oc get svc {{ service_name }} -n {{ effective_namespace }} >/dev/null 2>&1 || \
+        oc expose virtualmachineinstance {{ effective_vm_name }} -n {{ effective_namespace }} --name {{ service_name }} --port=80
+      register: svc_output
+      changed_when: "'created' in svc_output.stdout"
 
-    - name: Recreate route with OpenShift auto-generated hostname if needed
-      command: >
-        oc expose svc/{{ service_name }}
-        -n {{ effective_namespace }}
-        --name={{ route_name }}
-        --port=http
-        --hostname=""
-      when: route_host.stdout is match("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$")
-      register: recreate_route
-      ignore_errors: true
+    - name: Ensure Route exists for VM
+      shell: |
+        oc get route {{ route_name }} -n {{ effective_namespace }} >/dev/null 2>&1 || \
+        oc create route edge {{ route_name }} --service={{ service_name }} --insecure-policy=Redirect --port=http
+      register: route_output
+      changed_when: "'created' in route_output.stdout"
 
+    # ✅ FIXED SECTION BELOW
     - name: Wait for route to be admitted
+      vars:
+        route_check_cmd: >
+          oc get route {{ route_name }} -n {{ effective_namespace }}
+          -o jsonpath='{.status.ingress[0].conditions[?(@.type=="Admitted")].status}'
+      register: route_status
+      until: route_status.stdout is search("True")
       retries: "{{ max_retries }}"
       delay: "{{ retry_delay }}"
-      until: "'True' in route_status.stdout"
-      vars:
-        route_status: "{{ lookup('pipe', 'oc get route ' + route_name + ' -n ' + effective_namespace + ' -o jsonpath={.status.ingress[0].conditions[?(@.type==\"Admitted\")].status}') }}"
       ignore_errors: true
-
-    - name: Get final route host
-      command: >
-        oc get route {{ route_name }} -n {{ effective_namespace }} -o jsonpath='{.spec.host}'
-      register: final_route_host
       changed_when: false
-      ignore_errors: true
+      command: "{{ route_check_cmd }}"
 
-    - name: Display summary
+    - name: Get route host
+      command: oc get route {{ route_name }} -n {{ effective_namespace }} -o jsonpath='{.spec.host}'
+      register: route_host
+      changed_when: false
+
+    - name: Display resource summary
       debug:
         msg:
           - "==================================================================="
-          - " ✅ VM and Route Configuration Summary"
+          - " 🌐 Access Information"
           - "-------------------------------------------------------------------"
+          - " Internal VM IP: http://{{ vm_ipv4 }}"
+          - " Internal Service: http://{{ service_name }}.{{ effective_namespace }}.svc.cluster.local"
+          - " External Route: https://{{ route_host.stdout }}"
+          - "-------------------------------------------------------------------"
+          - " Resource Details:"
           - " VM Name: {{ effective_vm_name }}"
           - " Namespace: {{ effective_namespace }}"
           - " Service: {{ service_name }}"
           - " Route: {{ route_name }}"
-          - " Route Host: {{ final_route_host.stdout | default('Unavailable') }}"
-          - " Internal VM IP: http://{{ vm_ip }}"
-          - " Internal Service: http://{{ service_name }}.{{ effective_namespace }}.svc.cluster.local"
-          - "-------------------------------------------------------------------"
-          - " Access via Route: http://{{ final_route_host.stdout | default('Unavailable') }}"
+          - " ------------------------------------------------------------------"
+          - " ✅ Route Status: Admitted: {{ 'True' if 'True' in route_status.stdout else 'False' }}"
           - "==================================================================="
