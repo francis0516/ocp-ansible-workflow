@@ -5,21 +5,19 @@
   vars:
     default_vm_name: "apache-vm"
     default_vm_namespace: "vm-migration-test"
-    retries: 10
-    delay: 5
+    route_retries: 10
+    route_delay: 5
 
   tasks:
-
     - name: Set effective VM name and namespace
       set_fact:
         vm_name: "{{ vm_name | default(default_vm_name) }}"
         vm_namespace: "{{ vm_namespace | default(default_vm_namespace) }}"
 
     - name: Ensure KUBECONFIG is set
-      ansible.builtin.shell: |
-        export KUBECONFIG=/etc/kubernetes/static-pod-resources/kube-apiserver-certs/secrets/node-kubeconfigs/localhost.kubeconfig
-      environment:
-        KUBECONFIG: "/etc/kubernetes/static-pod-resources/kube-apiserver-certs/secrets/node-kubeconfigs/localhost.kubeconfig"
+      ansible.builtin.shell: "export KUBECONFIG=/etc/kubernetes/static-pod-resources/kube-apiserver-certs/secrets/node-kubeconfigs/localhost.kubeconfig"
+      args:
+        executable: /bin/bash
 
     - name: Get VMI information
       kubernetes.core.k8s_info:
@@ -34,10 +32,25 @@
         msg: "❌ VMI '{{ vm_name }}' not found in namespace '{{ vm_namespace }}'."
       when: (vmi_info.resources | default([])) | length == 0
 
-    - name: Fetch first IPv4 address from VMI interfaces
+    - name: Fetch first IPv4 address from VMI interfaces or fallback to ClusterIP
       set_fact:
-        vm_ip: "{{ (vmi_info.resources[0].status.interfaces | selectattr('ip', 'defined') | list)[0].ip }}"
-      when: (vmi_info.resources | length > 0) and (vmi_info.resources[0].status.interfaces is defined)
+        vm_ip: >-
+          {{ (vmi_info.resources[0].status.interfaces | selectattr('ip', 'defined') | map(attribute='ip') | select('match', '^[0-9]{1,3}(\.[0-9]{1,3}){3}$') | list | first) 
+             | default('') }}
+
+    - name: Fetch Service ClusterIP if VM IPv4 not found
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Service
+        namespace: "{{ vm_namespace }}"
+        name: "{{ vm_name }}-service"
+      register: svc_info
+      when: vm_ip == ''
+
+    - name: Set vm_ip to Service ClusterIP if VMI IPv4 not found
+      set_fact:
+        vm_ip: "{{ (svc_info.resources[0].spec.clusterIP | default('')) }}"
+      when: vm_ip == ''
 
     - name: Create Service for Apache VM
       kubernetes.core.k8s:
@@ -75,22 +88,32 @@
             to:
               kind: Service
               name: "{{ vm_name }}-service"
+              weight: 100
             port:
               targetPort: http
             tls:
               termination: edge
               insecureEdgeTerminationPolicy: Redirect
+            wildcardPolicy: None
 
-    - name: Wait for Route to be admitted
+    - name: Wait for Route to be ready
       kubernetes.core.k8s_info:
         api_version: route.openshift.io/v1
         kind: Route
         name: "{{ vm_name }}-route"
         namespace: "{{ vm_namespace }}"
       register: route_info
-      until: (route_info.resources | length > 0) and (route_info.resources[0].spec.host is defined)
-      retries: "{{ retries }}"
-      delay: "{{ delay }}"
+      until: (route_info.resources | default([{}]))[0].spec.host is defined
+      retries: "{{ route_retries }}"
+      delay: "{{ route_delay }}"
+
+    - name: Get Route status details
+      kubernetes.core.k8s_info:
+        api_version: route.openshift.io/v1
+        kind: Route
+        name: "{{ vm_name }}-route"
+        namespace: "{{ vm_namespace }}"
+      register: route_status
 
     - name: Display deployment information
       debug:
@@ -98,14 +121,14 @@
           - "==========================================================================="
           - "✅ Henogez WebServer Route Created Successfully!"
           - "==========================================================================="
-          - " External URL (HTTPS): https://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
-          - " External URL (HTTP - will redirect): http://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
-          - " Internal VM IP: http://{{ vm_ip | default('N/A') }}"
-          - " Internal Service: http://{{ vm_name }}-service.{{ vm_namespace }}.svc.cluster.local"
+          - "   Internal VM IP: http://{{ vm_ip }}"
+          - "   Internal Service: http://{{ vm_name }}-service.{{ vm_namespace }}.svc.cluster.local"
+          - "   External URL (HTTPS): https://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
+          - "   External URL (HTTP - will redirect): http://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
           - "-------------------------------------------------------------------"
           - " VM Name: {{ vm_name }}"
           - " Namespace: {{ vm_namespace }}"
           - " Service: {{ vm_name }}-service"
           - " Route: {{ vm_name }}-route"
-          - " ✅ Route Status: Admitted: {{ (route_info.resources | default([{}]))[0].status.ingress[0].conditions[0].status | default('Unknown') }}"
+          - " ✅ Route Status: Admitted: {{ (route_status.resources | default([{}]))[0].status.ingress[0].conditions[0].status | default('Unknown') }}"
           - "==========================================================================="
