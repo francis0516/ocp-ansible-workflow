@@ -13,10 +13,6 @@
 
   tasks:
 
-    - name: Ensure KUBECONFIG is set
-      ansible.builtin.set_env:
-        KUBECONFIG: "{{ kubeconfig_path }}"
-
     - name: Get VM information
       community.kubernetes.k8s_info:
         api_version: kubevirt.io/v1
@@ -25,6 +21,8 @@
         namespace: "{{ vm_namespace }}"
       register: vm_info
       failed_when: vm_info.resources | length == 0
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
 
     - name: Get VMI information
       community.kubernetes.k8s_info:
@@ -36,6 +34,8 @@
       retries: "{{ retries }}"
       delay: "{{ delay }}"
       until: vmi_info.resources | length > 0
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
 
     - name: Fetch VM IP (first IPv4)
       set_fact:
@@ -59,6 +59,8 @@
             tls:
               termination: edge
       register: route_result
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
 
     - name: Wait for route to be admitted
       command: >
@@ -67,10 +69,14 @@
       retries: "{{ retries }}"
       delay: "{{ delay }}"
       until: route_status.stdout == "True"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
 
     - name: Fetch Route hostname
       command: oc get route {{ route_name }} -n {{ vm_namespace }} -o jsonpath='{.spec.host}'
       register: route_hostname
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
 
     - name: Display VM and Route info
       debug:
