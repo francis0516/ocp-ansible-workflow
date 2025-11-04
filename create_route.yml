@@ -1,6 +1,5 @@
 ---
-- name: Create Service and Route for Apache VM using dynamic IPv4
-  hosts: localhost
+- hosts: localhost
   gather_facts: false
 
   vars:
@@ -14,21 +13,29 @@
         vm_name: "{{ vm_name | default(default_vm_name) }}"
         vm_namespace: "{{ vm_namespace | default(default_vm_namespace) }}"
 
-    - name: Get VM IPv4 from dynamic inventory
-      set_fact:
-        vm_ip: "{{ hostvars['apache-vm'].ansible_default_ipv4.address | default('N/A') }}"
-      when: "'apache-vm' in hostvars"
+    - name: Get VMI information
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_namespace }}"
+      register: vmi_info
+      ignore_errors: yes
 
-    - name: Fail if VM IP not found
+    - name: Fail if VMI does not exist
       fail:
-        msg: "❌ Could not fetch VM IP. Make sure the configure LAMP playbook ran successfully."
-      when: vm_ip == 'N/A'
+        msg: "❌ VMI '{{ vm_name }}' not found in namespace '{{ vm_namespace }}'."
+      when: (vmi_info.resources | default([])) | length == 0
 
-    - name: Display VM IPv4 for debugging
+    - name: Fetch VM IPv4 from eth0
+      set_fact:
+        vm_ip: "{{ (vmi_info.resources[0].status.interfaces | selectattr('name','equalto','eth0') | list)[0].ipAddresses[0] }}"
+
+    - name: Display VM IPv4
       debug:
-        msg: "VM {{ vm_name }} IPv4: {{ vm_ip }}"
+        msg: "VM IPv4 to use for Service: {{ vm_ip }}"
 
-    - name: Create Service for Apache VM
+    - name: Create Service with externalIPs
       kubernetes.core.k8s:
         state: present
         definition:
@@ -40,14 +47,14 @@
             labels:
               app: "{{ vm_name }}"
           spec:
-            selector:
-              vm.kubevirt.io/name: "{{ vm_name }}"
             ports:
               - name: http
                 protocol: TCP
                 port: 80
                 targetPort: 80
             type: ClusterIP
+            externalIPs:
+              - "{{ vm_ip }}"
 
     - name: Create Route for Apache VM
       kubernetes.core.k8s:
@@ -81,18 +88,19 @@
       register: route_info
       until: (route_info.resources | default([{}]))[0].spec.host is defined
       retries: 10
-      delay: 5
+      delay: 2
 
-    - name: Display Route information
+    - name: Display deployment information
       debug:
         msg:
           - "==========================================================================="
           - "✅ Henogez WebServer Route Created Successfully!"
           - "==========================================================================="
-          - "   VM IPv4: {{ vm_ip }}"
-          - "   External URL (HTTPS): https://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
-          - "   External URL (HTTP - will redirect): http://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
+          - "   Access your web server at:"
+          - "   External URL (HTTPS): https://{{ route_info.resources[0].spec.host }}"
+          - "   External URL (HTTP - will redirect): http://{{ route_info.resources[0].spec.host }}"
           - "   Internal Service: http://{{ vm_name }}-service.{{ vm_namespace }}.svc.cluster.local"
+          - "   Resource Details:"
           - "   VM Name: {{ vm_name }}"
           - "   Namespace: {{ vm_namespace }}"
           - "   Service: {{ vm_name }}-service"
