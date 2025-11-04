@@ -2,10 +2,6 @@
 - hosts: localhost
   gather_facts: false
 
-  # ✅ Set KUBECONFIG for the entire play
-  environment:
-    KUBECONFIG: "/etc/kubernetes/static-pod-resources/kube-apiserver-certs/secrets/node-kubeconfigs/localhost.kubeconfig"
-
   vars:
     default_vm_name: "apache-vm"
     default_vm_namespace: "vm-migration-test"
@@ -19,6 +15,11 @@
         vm_name: "{{ vm_name | default(default_vm_name) }}"
         vm_namespace: "{{ vm_namespace | default(default_vm_namespace) }}"
 
+    - name: Ensure KUBECONFIG is set
+      ansible.builtin.shell: "export KUBECONFIG=/etc/kubernetes/static-pod-resources/kube-apiserver-certs/secrets/node-kubeconfigs/localhost.kubeconfig"
+      environment:
+        KUBECONFIG: "/etc/kubernetes/static-pod-resources/kube-apiserver-certs/secrets/node-kubeconfigs/localhost.kubeconfig"
+
     - name: Get VM information
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
@@ -26,11 +27,12 @@
         name: "{{ vm_name }}"
         namespace: "{{ vm_namespace }}"
       register: vm_info
-      failed_when: vm_info.resources | length == 0
+      ignore_errors: yes
 
-    - name: Display VM labels for debugging
-      debug:
-        msg: "VM Labels: {{ (vm_info.resources | default([{}]))[0].metadata.labels | default({}) }}"
+    - name: Fail if VM does not exist
+      fail:
+        msg: "❌ VM '{{ vm_name }}' not found in namespace '{{ vm_namespace }}'."
+      when: (vm_info.resources | default([])) | length == 0
 
     - name: Get VMI information
       kubernetes.core.k8s_info:
@@ -39,13 +41,31 @@
         name: "{{ vm_name }}"
         namespace: "{{ vm_namespace }}"
       register: vmi_info
+      retries: "{{ retries }}"
+      delay: "{{ delay }}"
+      until: vmi_info.resources | length > 0 and
+             vmi_info.resources[0].status.phase == "Running"
+
+    - name: Wait for VMI to have at least one interface with IPv4
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_namespace }}"
+      register: vmi_info_with_ip
+      retries: "{{ retries }}"
+      delay: "{{ delay }}"
+      until: vmi_info_with_ip.resources | length > 0 and
+             vmi_info_with_ip.resources[0].status.interfaces is defined and
+             (vmi_info_with_ip.resources[0].status.interfaces
+              | selectattr('ipAddresses', 'defined') | list | length) > 0
 
     - name: Fetch first IPv4 address from VM interfaces
       set_fact:
         vm_ip: >-
           {{
             (
-              vmi_info.resources[0].status.interfaces
+              vmi_info_with_ip.resources[0].status.interfaces
               | selectattr('ipAddresses', 'defined')
               | map(attribute='ipAddresses')
               | map('first')
@@ -53,10 +73,6 @@
               | first
             )
           }}
-      failed_when: vm_ip is not defined
-      retries: "{{ retries }}"
-      delay: "{{ delay }}"
-      until: vm_ip is defined
 
     - name: Create Service for Apache VM
       kubernetes.core.k8s:
@@ -78,24 +94,6 @@
                 port: 80
                 targetPort: 80
             type: ClusterIP
-
-    - name: Verify Service endpoints
-      kubernetes.core.k8s_info:
-        api_version: v1
-        kind: Endpoints
-        name: "{{ vm_name }}-service"
-        namespace: "{{ vm_namespace }}"
-      register: service_endpoints
-
-    - name: Display Service endpoint status
-      debug:
-        msg: "Service Endpoints: {{ (service_endpoints.resources | default([{}]))[0].subsets | default([]) }}"
-      when: (service_endpoints.resources | default([])) | length > 0
-
-    - name: Display warning if no endpoints found
-      debug:
-        msg: "⚠ Warning: No endpoints found! Check if VM selector matches."
-      when: (service_endpoints.resources | default([]))[0].subsets is not defined
 
     - name: Create Route for Apache VM
       kubernetes.core.k8s:
@@ -127,9 +125,9 @@
         name: "{{ vm_name }}-route"
         namespace: "{{ vm_namespace }}"
       register: route_info
-      until: (route_info.resources | default([{}]))[0].spec.host is defined
       retries: "{{ retries }}"
       delay: "{{ delay }}"
+      until: (route_info.resources | default([{}]))[0].spec.host is defined
 
     - name: Get Route status details
       kubernetes.core.k8s_info:
@@ -145,9 +143,8 @@
           - "==========================================================================="
           - "✅ Henogez WebServer Route Created Successfully!"
           - "==========================================================================="
-          - "   Access your web server at:"
-          - "   External URL (HTTPS): https://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
-          - "   External URL (HTTP - will redirect): http://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
+          - "   External URL (HTTPS): https://{{ (route_info.resources | default([{}]))[0].spec.host | default(vm_ip) }}"
+          - "   External URL (HTTP - will redirect): http://{{ (route_info.resources | default([{}]))[0].spec.host | default(vm_ip) }}"
           - "   Internal VM IP: http://{{ vm_ip }}"
           - "   Internal Service: http://{{ vm_name }}-service.{{ vm_namespace }}.svc.cluster.local"
           - "   Resource Details:"
@@ -155,5 +152,5 @@
           - "   Namespace: {{ vm_namespace }}"
           - "   Service: {{ vm_name }}-service"
           - "   Route: {{ vm_name }}-route"
-          - "   Route Status: Admitted: {{ (route_status.resources | default([{}]))[0].status.ingress[0].conditions[0].status | default('Unknown') }}"
+          - "   ✅ Route Status: Admitted: {{ (route_status.resources | default([{}]))[0].status.ingress[0].conditions[0].status | default('Unknown') }}"
           - "==========================================================================="
