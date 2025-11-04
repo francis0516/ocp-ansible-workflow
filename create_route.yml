@@ -5,52 +5,37 @@
   vars:
     default_vm_name: "apache-vm"
     default_vm_namespace: "vm-migration-test"
-    route_retries: 10
-    route_delay: 5
+    retries: 10
+    delay: 3
 
   tasks:
+
     - name: Set effective VM name and namespace
       set_fact:
         vm_name: "{{ vm_name | default(default_vm_name) }}"
         vm_namespace: "{{ vm_namespace | default(default_vm_namespace) }}"
 
     - name: Ensure KUBECONFIG is set
-      ansible.builtin.shell: "export KUBECONFIG=/etc/kubernetes/static-pod-resources/kube-apiserver-certs/secrets/node-kubeconfigs/localhost.kubeconfig"
+      ansible.builtin.shell: |
+        export KUBECONFIG=/etc/kubernetes/static-pod-resources/kube-apiserver-certs/secrets/node-kubeconfigs/localhost.kubeconfig
       args:
         executable: /bin/bash
 
-    - name: Get VMI information
+    - name: Get VM information
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
-        kind: VirtualMachineInstance
+        kind: VirtualMachine
         name: "{{ vm_name }}"
         namespace: "{{ vm_namespace }}"
-      register: vmi_info
+      register: vm_info
+      retries: "{{ retries }}"
+      delay: "{{ delay }}"
+      until: (vm_info.resources | default([])) | length > 0
 
-    - name: Fail if VMI does not exist
+    - name: Fail if VM does not exist
       fail:
-        msg: "❌ VMI '{{ vm_name }}' not found in namespace '{{ vm_namespace }}'."
-      when: (vmi_info.resources | default([])) | length == 0
-
-    - name: Fetch first IPv4 address from VMI interfaces or fallback to ClusterIP
-      set_fact:
-        vm_ip: >-
-          {{ (vmi_info.resources[0].status.interfaces | selectattr('ip', 'defined') | map(attribute='ip') | select('match', '^[0-9]{1,3}(\.[0-9]{1,3}){3}$') | list | first) 
-             | default('') }}
-
-    - name: Fetch Service ClusterIP if VM IPv4 not found
-      kubernetes.core.k8s_info:
-        api_version: v1
-        kind: Service
-        namespace: "{{ vm_namespace }}"
-        name: "{{ vm_name }}-service"
-      register: svc_info
-      when: vm_ip == ''
-
-    - name: Set vm_ip to Service ClusterIP if VMI IPv4 not found
-      set_fact:
-        vm_ip: "{{ (svc_info.resources[0].spec.clusterIP | default('')) }}"
-      when: vm_ip == ''
+        msg: "❌ VM '{{ vm_name }}' not found in namespace '{{ vm_namespace }}'."
+      when: (vm_info.resources | default([])) | length == 0
 
     - name: Create Service for Apache VM
       kubernetes.core.k8s:
@@ -96,16 +81,16 @@
               insecureEdgeTerminationPolicy: Redirect
             wildcardPolicy: None
 
-    - name: Wait for Route to be ready
+    - name: Wait for Route to be admitted
       kubernetes.core.k8s_info:
         api_version: route.openshift.io/v1
         kind: Route
         name: "{{ vm_name }}-route"
         namespace: "{{ vm_namespace }}"
       register: route_info
-      until: (route_info.resources | default([{}]))[0].spec.host is defined
-      retries: "{{ route_retries }}"
-      delay: "{{ route_delay }}"
+      retries: "{{ retries }}"
+      delay: "{{ delay }}"
+      until: (route_info.resources | default([{}]))[0].status.ingress is defined
 
     - name: Get Route status details
       kubernetes.core.k8s_info:
@@ -115,14 +100,12 @@
         namespace: "{{ vm_namespace }}"
       register: route_status
 
-    - name: Display deployment information
+    - name: Display deployment information using Route URL
       debug:
         msg:
           - "==========================================================================="
           - "✅ Henogez WebServer Route Created Successfully!"
           - "==========================================================================="
-          - "   Internal VM IP: http://{{ vm_ip }}"
-          - "   Internal Service: http://{{ vm_name }}-service.{{ vm_namespace }}.svc.cluster.local"
           - "   External URL (HTTPS): https://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
           - "   External URL (HTTP - will redirect): http://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
           - "-------------------------------------------------------------------"
