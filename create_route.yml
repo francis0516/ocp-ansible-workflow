@@ -1,39 +1,62 @@
 ---
-- hosts: localhost
+- name: Configure VM network and create OpenShift route
+  hosts: localhost
   gather_facts: false
 
   vars:
-    # ✅ Define clean defaults without self-reference
     default_vm_name: "apache-vm"
     default_vm_namespace: "vm-migration-test"
+    vm_ip: "10.0.0.130"  # override at runtime
+    vm_user: "root"
+    vm_password: "password"
 
   tasks:
 
-    # ✅ Set VM name and namespace safely (avoids recursion)
     - name: Set effective VM name and namespace
       set_fact:
         vm_name: "{{ vm_name | default(default_vm_name) }}"
         vm_namespace: "{{ vm_namespace | default(default_vm_namespace) }}"
 
-    - name: Get VM information
-      kubernetes.core.k8s_info:
-        api_version: kubevirt.io/v1
-        kind: VirtualMachine
+    - name: Add VM to dynamic inventory
+      add_host:
         name: "{{ vm_name }}"
-        namespace: "{{ vm_namespace }}"
-      register: vm_info
+        ansible_host: "{{ vm_ip }}"
+        ansible_user: "{{ vm_user }}"
+        ansible_password: "{{ vm_password }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+        groups: dynamic_vms
+
+- hosts: dynamic_vms
+  gather_facts: yes
+  become: yes
+
+  tasks:
+    - name: Delete old eth0 connection if exists
+      command: nmcli con delete eth0
       ignore_errors: yes
 
-    - name: Fail if VM does not exist
-      fail:
-        msg: "❌ VM '{{ vm_name }}' not found in namespace '{{ vm_namespace }}'."
-      when: (vm_info.resources | default([])) | length == 0
+    - name: Create persistent static eth0 network
+      command: >
+        nmcli connection add type ethernet autoconnect yes con-name eth0 ifname eth0
+        ipv4.addresses {{ vm_ip }}/24
+        ipv4.gateway 10.0.0.1
+        ipv4.dns 10.0.0.17,8.8.8.8
+        ipv4.dns-search ocp4.henogez.com
+        ipv4.method manual
+      ignore_errors: no
 
-    - name: Display VM labels for debugging
-      debug:
-        msg: "VM Labels: {{ (vm_info.resources | default([{}]))[0].metadata.labels | default({}) }}"
-      when: (vm_info.resources | default([])) | length > 0
+    - name: Bring up eth0 connection
+      command: nmcli connection up eth0
 
+    - name: Restart NetworkManager to apply changes
+      systemd:
+        name: NetworkManager
+        state: restarted
+
+- hosts: localhost
+  gather_facts: false
+
+  tasks:
     - name: Create Service for Apache VM
       kubernetes.core.k8s:
         state: present
@@ -54,30 +77,6 @@
                 port: 80
                 targetPort: 80
             type: ClusterIP
-
-    - name: Verify Service endpoints
-      kubernetes.core.k8s_info:
-        api_version: v1
-        kind: Endpoints
-        name: "{{ vm_name }}-service"
-        namespace: "{{ vm_namespace }}"
-      register: service_endpoints
-
-    - name: Display Service endpoint status
-      debug:
-        msg: "Service Endpoints: {{ (service_endpoints.resources | default([{}]))[0].subsets | default([]) }}"
-      when:
-        - (service_endpoints.resources | default([])) | length > 0
-        - (service_endpoints.resources[0].subsets is defined)
-        - (service_endpoints.resources[0].subsets | length > 0)
-
-    - name: Display warning if no endpoints found
-      debug:
-        msg: "⚠ Warning: No endpoints found! Check if VM selector matches."
-      when:
-        - (service_endpoints.resources | default([])) | length == 0 or
-          service_endpoints.resources[0].subsets is not defined or
-          service_endpoints.resources[0].subsets | length == 0
 
     - name: Create Route for Apache VM
       kubernetes.core.k8s:
@@ -111,15 +110,7 @@
       register: route_info
       until: (route_info.resources | default([{}]))[0].spec.host is defined
       retries: 10
-      delay: 2
-
-    - name: Get Route status details
-      kubernetes.core.k8s_info:
-        api_version: route.openshift.io/v1
-        kind: Route
-        name: "{{ vm_name }}-route"
-        namespace: "{{ vm_namespace }}"
-      register: route_status
+      delay: 5
 
     - name: Display deployment information
       debug:
@@ -127,14 +118,11 @@
           - "==========================================================================="
           - "✅ Henogez WebServer Route Created Successfully!"
           - "==========================================================================="
-          - "   Access your web server at:"
           - "   External URL (HTTPS): https://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
           - "   External URL (HTTP - will redirect): http://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
           - "   Internal Service: http://{{ vm_name }}-service.{{ vm_namespace }}.svc.cluster.local"
-          - "   Resource Details:"
           - "   VM Name: {{ vm_name }}"
           - "   Namespace: {{ vm_namespace }}"
           - "   Service: {{ vm_name }}-service"
           - "   Route: {{ vm_name }}-route"
-          - "   Route Status: Admitted: {{ (route_status.resources | default([{}]))[0].status.ingress[0].conditions[0].status | default('Unknown') }}"
           - "==========================================================================="
