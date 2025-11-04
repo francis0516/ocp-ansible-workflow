@@ -1,14 +1,14 @@
 ---
-- name: Create OpenShift Route for Apache VM
+- name: Create Route for VM Service and Verify Access
   hosts: localhost
-  gather_facts: no
+  gather_facts: false
   vars:
     vm_name: apache-vm
     vm_namespace: vm-migration-test
     service_name: apache-vm-service
     route_name: apache-vm-route
-    port_name: http
-    target_port: 80
+    max_retries: 10
+    retry_delay: 10
 
   tasks:
     - name: Set effective VM name and namespace
@@ -17,105 +17,82 @@
         effective_namespace: "{{ vm_namespace }}"
 
     - name: Get VM information
-      kubernetes.core.k8s_info:
-        api_version: kubevirt.io/v1
-        kind: VirtualMachine
-        name: "{{ effective_vm_name }}"
-        namespace: "{{ effective_namespace }}"
+      command: >
+        oc get vm {{ effective_vm_name }}
+        -n {{ effective_namespace }}
+        -o json
       register: vm_info
-      failed_when: false
+      failed_when: vm_info.rc != 0
+      changed_when: false
 
-    - name: Fail if VM does not exist
-      fail:
-        msg: "The VM '{{ effective_vm_name }}' was not found in namespace '{{ effective_namespace }}'."
-      when: vm_info.resources | length == 0
-
-    ###################################################################
-    # FIX: Wait and retry until the VM has an IPv4 address assigned
-    ###################################################################
-    - name: Wait until VM has IPv4 assigned
-      kubernetes.core.k8s_info:
-        api_version: kubevirt.io/v1
-        kind: VirtualMachineInstance
-        name: "{{ effective_vm_name }}"
-        namespace: "{{ effective_namespace }}"
-      register: vmi_info
-      until:
-        - vmi_info.resources | length > 0
-        - vmi_info.resources[0].status.interfaces is defined
-        - (vmi_info.resources[0].status.interfaces | selectattr('ipAddresses', 'defined') | list) | length > 0
-      retries: 20
-      delay: 10
-
-    - name: Fetch VM IPv4 from first interface with IPv4
+    - name: Fetch VM IPv4
       set_fact:
-        vm_ip: "{{ (vmi_info.resources[0].status.interfaces | selectattr('ipAddresses', 'defined') | list)[0].ipAddresses[0] }}"
+        vm_ip: "{{ vm_info.stdout | from_json | json_query('status.interfaces[0].ipAddress') | default('') }}"
+      when: vm_info.stdout | from_json | json_query('status.interfaces') is defined
 
-    - name: Display VM IPv4
-      debug:
-        msg: "✅ VM IPv4: {{ vm_ip }}"
+    - name: Ensure VM IPv4 was found
+      fail:
+        msg: "Unable to determine IPv4 address for VM {{ effective_vm_name }}"
+      when: vm_ip == ""
 
-    ###################################################################
-    # Create the Service for Apache VM
-    ###################################################################
-    - name: Create Service for Apache VM
-      kubernetes.core.k8s:
-        state: present
-        namespace: "{{ effective_namespace }}"
-        definition:
-          apiVersion: v1
-          kind: Service
-          metadata:
-            name: "{{ service_name }}"
-            labels:
-              app: apache-vm
-          spec:
-            selector:
-              kubevirt.io/domain: "{{ effective_vm_name }}"
-            ports:
-              - name: "{{ port_name }}"
-                protocol: TCP
-                port: 80
-                targetPort: 80
+    - name: Ensure Service exists
+      command: >
+        oc get svc {{ service_name }} -n {{ effective_namespace }}
+      register: svc_check
+      failed_when: svc_check.rc != 0
+      changed_when: false
 
-    ###################################################################
-    # Create the Route to expose Apache externally
-    ###################################################################
-    - name: Create Route for Apache VM
-      kubernetes.core.k8s:
-        state: present
-        namespace: "{{ effective_namespace }}"
-        definition:
-          apiVersion: route.openshift.io/v1
-          kind: Route
-          metadata:
-            name: "{{ route_name }}"
-          spec:
-            to:
-              kind: Service
-              name: "{{ service_name }}"
-            port:
-              targetPort: "{{ port_name }}"
-            tls:
-              termination: edge
-      register: route_result
+    - name: Check if Route already exists
+      command: >
+        oc get route {{ route_name }} -n {{ effective_namespace }} -o jsonpath='{.spec.host}'
+      register: route_host
+      ignore_errors: true
+      changed_when: false
 
-    ###################################################################
-    # Display final status summary
-    ###################################################################
-    - name: Display final Route and VM information
+    - name: Delete route if host is an internal IP
+      command: oc delete route {{ route_name }} -n {{ effective_namespace }}
+      when: route_host.stdout is match("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$")
+      ignore_errors: true
+
+    - name: Recreate route with OpenShift auto-generated hostname if needed
+      command: >
+        oc expose svc/{{ service_name }}
+        -n {{ effective_namespace }}
+        --name={{ route_name }}
+        --port=http
+        --hostname=""
+      when: route_host.stdout is match("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$")
+      register: recreate_route
+      ignore_errors: true
+
+    - name: Wait for route to be admitted
+      retries: "{{ max_retries }}"
+      delay: "{{ retry_delay }}"
+      until: "'True' in route_status.stdout"
+      vars:
+        route_status: "{{ lookup('pipe', 'oc get route ' + route_name + ' -n ' + effective_namespace + ' -o jsonpath={.status.ingress[0].conditions[?(@.type==\"Admitted\")].status}') }}"
+      ignore_errors: true
+
+    - name: Get final route host
+      command: >
+        oc get route {{ route_name }} -n {{ effective_namespace }} -o jsonpath='{.spec.host}'
+      register: final_route_host
+      changed_when: false
+      ignore_errors: true
+
+    - name: Display summary
       debug:
         msg:
           - "==================================================================="
-          - " 🌐 External URL (HTTPS): https://{{ route_result.result.spec.host }}"
-          - " 🌐 Internal VM IP: http://{{ vm_ip }}"
-          - " 🌐 Internal Service: http://{{ service_name }}.{{ effective_namespace }}.svc.cluster.local"
-          - " ------------------------------------------------------------------"
-          - " 🧱 Resource Details:"
-          - "    VM Name: {{ effective_vm_name }}"
-          - "    Namespace: {{ effective_namespace }}"
-          - "    Service: {{ service_name }}"
-          - "    Route: {{ route_name }}"
-          - " ------------------------------------------------------------------"
-          - " ✅ Route Status: Admitted: {{ route_result.result.status.ingress[0].conditions[0].status | default('Unknown') }}"
+          - " ✅ VM and Route Configuration Summary"
+          - "-------------------------------------------------------------------"
+          - " VM Name: {{ effective_vm_name }}"
+          - " Namespace: {{ effective_namespace }}"
+          - " Service: {{ service_name }}"
+          - " Route: {{ route_name }}"
+          - " Route Host: {{ final_route_host.stdout | default('Unavailable') }}"
+          - " Internal VM IP: http://{{ vm_ip }}"
+          - " Internal Service: http://{{ service_name }}.{{ effective_namespace }}.svc.cluster.local"
+          - "-------------------------------------------------------------------"
+          - " Access via Route: http://{{ final_route_host.stdout | default('Unavailable') }}"
           - "==================================================================="
