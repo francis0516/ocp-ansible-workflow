@@ -1,5 +1,5 @@
 ---
-- name: Create Route and Fetch VM Details
+- name: Create Route and Fetch VM URLs
   hosts: localhost
   gather_facts: false
   environment:
@@ -7,61 +7,29 @@
   vars:
     vm_name: apache-vm
     vm_namespace: vm-migration-test
-    route_name: "{{ vm_name }}-route"
     service_name: "{{ vm_name }}-service"
+    route_name: "{{ vm_name }}-route"
     retries: 5
     delay: 10
 
   tasks:
 
-    - name: Set effective VM name and namespace
-      set_fact:
-        effective_vm_name: "{{ vm_name }}"
-        effective_namespace: "{{ vm_namespace }}"
-
-    - name: Get VMI information
-      community.kubernetes.k8s_info:
-        api_version: kubevirt.io/v1
-        kind: VirtualMachineInstance
-        namespace: "{{ effective_namespace }}"
-        name: "{{ effective_vm_name }}"
-      register: vmi_result
+    - name: Get internal service ClusterIP
+      command: "oc get svc {{ service_name }} -n {{ vm_namespace }} -o jsonpath='{.spec.clusterIP}'"
+      register: internal_ip
       retries: "{{ retries }}"
       delay: "{{ delay }}"
-      until: vmi_result.resources | length > 0
+      until: internal_ip.stdout != ""
 
-    - name: Fail if VMI does not exist
-      fail:
-        msg: "The VM {{ effective_vm_name }} does not exist in namespace {{ effective_namespace }}"
-      when: vmi_result.resources | length == 0
-
-    - name: Fetch the route URL
-      command: "oc get route {{ route_name }} -n {{ effective_namespace }} -o jsonpath='{.spec.host}'"
-      register: route_result
+    - name: Get external route host
+      command: "oc get route {{ route_name }} -n {{ vm_namespace }} -o jsonpath='{.spec.host}'"
+      register: external_route
       retries: "{{ retries }}"
       delay: "{{ delay }}"
-      until: route_result.stdout != ""
+      until: external_route.stdout != ""
 
-    - name: Create route if it does not exist
-      command: "oc expose svc {{ service_name }} -n {{ effective_namespace }} --name={{ route_name }} --port=http"
-      register: expose_result
-      failed_when: false
-      changed_when: "'AlreadyExists' not in expose_result.stderr"
-
-    - name: Wait for route to be admitted
-      command: "oc get route {{ route_name }} -n {{ effective_namespace }} -o jsonpath='{.status.ingress[0].conditions[?(@.type==\"Admitted\")].status}'"
-      register: route_status
-      retries: "{{ retries }}"
-      delay: "{{ delay }}"
-      until: route_status.stdout == "True"
-
-    - name: Display VM and route details
+    - name: Display internal and external URLs
       debug:
         msg:
-          - "External URL (HTTP/HTTPS): https://{{ route_result.stdout }}"
-          - "Resource Details:"
-          - "VM Name: {{ effective_vm_name }}"
-          - "Namespace: {{ effective_namespace }}"
-          - "Service: {{ service_name }}"
-          - "Route: {{ route_name }}"
-          - "✅ Route Status: Admitted: True"
+          - "Internal Service URL: http://{{ internal_ip.stdout }}"
+          - "External Route URL: https://{{ external_route.stdout }}"
