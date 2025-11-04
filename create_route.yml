@@ -5,59 +5,84 @@
   vars:
     vm_name: apache-vm
     vm_namespace: vm-migration-test
+    service_name: apache-vm-service
+    route_name: apache-vm-route
     retries: 10
-    delay: 10
+    delay: 6
+    kubeconfig_path: /etc/kubernetes/static-pod-resources/kube-apiserver-certs/secrets/node-kubeconfigs/localhost.kubeconfig
 
   tasks:
 
     - name: Ensure KUBECONFIG is set
-      ansible.builtin.set_fact:
-        ansible_env:
-          KUBECONFIG: /home/hogege/kubeconfig  # <-- Update path as needed
+      ansible.builtin.set_env:
+        KUBECONFIG: "{{ kubeconfig_path }}"
 
-    - name: Fail if VM does not exist
-      ansible.builtin.command: >
-        oc get vm {{ vm_name }} -n {{ vm_namespace }}
-      register: vm_check
-      failed_when: vm_check.rc != 0
-      changed_when: false
+    - name: Get VM information
+      community.kubernetes.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_namespace }}"
+      register: vm_info
+      failed_when: vm_info.resources | length == 0
 
-    - name: Get VMI IP via oc
-      ansible.builtin.command: >
-        oc get vmi {{ vm_name }} -n {{ vm_namespace }} -o jsonpath='{.status.interfaces[0].ip}'
-      register: vm_ip
+    - name: Get VMI information
+      community.kubernetes.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_namespace }}"
+      register: vmi_info
       retries: "{{ retries }}"
       delay: "{{ delay }}"
-      until: vm_ip.stdout != ""
-      changed_when: false
+      until: vmi_info.resources | length > 0
 
-    - name: Get OpenShift cluster domain via oc
-      ansible.builtin.command: >
-        oc get ingresses.config/cluster -o jsonpath='{.spec.domain}'
-      register: cluster_domain
+    - name: Fetch VM IP (first IPv4)
+      set_fact:
+        vm_ip: "{{ (vmi_info.resources[0].status.interfaces | selectattr('ipAddresses','defined') | list)[0].ipAddresses[0] }}"
+      when: vmi_info.resources | length > 0
+
+    - name: Ensure Route exists
+      community.kubernetes.k8s:
+        api_version: route.openshift.io/v1
+        kind: Route
+        namespace: "{{ vm_namespace }}"
+        name: "{{ route_name }}"
+        state: present
+        definition:
+          spec:
+            to:
+              kind: Service
+              name: "{{ service_name }}"
+            port:
+              targetPort: http
+            tls:
+              termination: edge
+      register: route_result
+
+    - name: Wait for route to be admitted
+      command: >
+        oc get route {{ route_name }} -n {{ vm_namespace }} -o jsonpath='{.status.ingress[0].conditions[?(@.type=="Admitted")].status}'
+      register: route_status
       retries: "{{ retries }}"
       delay: "{{ delay }}"
-      until: cluster_domain.stdout != ""
-      changed_when: false
+      until: route_status.stdout == "True"
 
-    - name: Get route hostname
-      ansible.builtin.command: >
-        oc get route {{ vm_name }}-route -n {{ vm_namespace }} -o jsonpath='{.spec.host}'
-      register: route_host
-      retries: "{{ retries }}"
-      delay: "{{ delay }}"
-      until: route_host.stdout != ""
-      changed_when: false
+    - name: Fetch Route hostname
+      command: oc get route {{ route_name }} -n {{ vm_namespace }} -o jsonpath='{.spec.host}'
+      register: route_hostname
 
-    - name: Display VM and Route Details
-      ansible.builtin.debug:
+    - name: Display VM and Route info
+      debug:
         msg:
-          - "External URL (HTTPS): https://{{ route_host.stdout }}"
-          - "External URL (HTTP - will redirect): http://{{ route_host.stdout }}"
-          - "Internal VM IP: http://{{ vm_ip.stdout }}"
-          - "Internal Service: http://{{ vm_name }}-service.{{ vm_namespace }}.svc.cluster.local"
-          - "Resource Details:"
-          - "  VM Name: {{ vm_name }}"
-          - "  Namespace: {{ vm_namespace }}"
-          - "  Service: {{ vm_name }}-service"
-          - "  Route: {{ vm_name }}-route"
+          - "External URL (HTTPS): https://{{ route_hostname.stdout }}"
+          - "External URL (HTTP - will redirect): http://{{ route_hostname.stdout }}"
+          - "-------------------------------------------------------------------"
+          - "VM Name: {{ vm_name }}"
+          - "Namespace: {{ vm_namespace }}"
+          - "Service: {{ service_name }}"
+          - "Route: {{ route_name }}"
+          - "✅ Route Status: Admitted: True"
+          - "Internal VM IP: http://{{ vm_ip }}"
+          - "Internal Service: http://{{ service_name }}.{{ vm_namespace }}.svc.cluster.local"
+          - "==================================================================="
