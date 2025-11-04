@@ -22,7 +22,6 @@
         name: "{{ vm_name }}"
         namespace: "{{ vm_namespace }}"
       register: vmi_info
-      failed_when: (vmi_info.resources | default([])) | length == 0
       retries: 3
       delay: 3
 
@@ -39,11 +38,25 @@
             )[0]
           }}
       when: vmi_info.resources | length > 0
-      failed_when: vm_ip is not defined
+      ignore_errors: yes
 
-    - name: Debug VM IPv4
+    - name: Fallback to Service ClusterIP if VM IPv4 not found
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Service
+        name: "{{ vm_name }}-service"
+        namespace: "{{ vm_namespace }}"
+      register: service_info
+      when: vm_ip is not defined
+
+    - name: Set VM IP to Service ClusterIP as fallback
+      set_fact:
+        vm_ip: "{{ service_info.resources[0].spec.clusterIP }}"
+      when: vm_ip is not defined
+
+    - name: Debug VM IPv4 or fallback
       debug:
-        msg: "VM IPv4: {{ vm_ip }}"
+        msg: "VM IP being used: {{ vm_ip }}"
 
     - name: Create Service for Apache VM
       kubernetes.core.k8s:
@@ -141,7 +154,7 @@
           - "   Access your web server at:"
           - "   External URL (HTTPS): https://{{ route_info.resources[0].spec.host }}"
           - "   External URL (HTTP - will redirect): http://{{ route_info.resources[0].spec.host }}"
-          - "   Internal VM IP: http://{{ vm_ip }}"
+          - "   Internal VM IP / fallback: http://{{ vm_ip }}"
           - "   Internal Service: http://{{ vm_name }}-service.{{ vm_namespace }}.svc.cluster.local"
           - "   Resource Details:"
           - "   VM Name: {{ vm_name }}"
