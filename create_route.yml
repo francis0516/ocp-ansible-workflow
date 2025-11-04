@@ -12,7 +12,7 @@
 
   tasks:
     - name: Ensure oc CLI is available
-      command: which oc
+      ansible.builtin.command: bash -c 'command -v oc'
       register: oc_check
       failed_when: oc_check.rc != 0
       changed_when: false
