@@ -2,6 +2,7 @@
 - hosts: localhost
   gather_facts: no
   tasks:
+
     - name: Get VM information
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
@@ -68,37 +69,30 @@
         namespace: "{{ vm_namespace | default('vm-migration-test') }}"
       register: route_info
       until: route_info.resources[0].status.ingress[0].routerCanonicalHostname is defined
-      retries: 10
-      delay: 3
+      retries: 15
+      delay: 5
 
     - name: Display deployment information
       debug:
         msg:
-          - "=========================================================================="
+          - "====================================================================="
           - "Henogez WebServer Route Created Successfully!"
-          - "=========================================================================="
-          - "Access your web server at:"
+          - "====================================================================="
+          - "   Access your web server at:"
           - ""
-          - "External URL (HTTPS):"
-          - "https://{{ route_info.resources[0].status.ingress[0].routerCanonicalHostname }}"
+          - "   External URL (HTTPS):"
+          - "   https://{{ route_info.resources[0].status.ingress[0].routerCanonicalHostname }}"
           - ""
-          - "External URL (HTTP - will redirect):"
-          - "http://{{ route_info.resources[0].status.ingress[0].routerCanonicalHostname }}"
+          - "   External URL (HTTP - will redirect):"
+          - "   http://{{ route_info.resources[0].status.ingress[0].routerCanonicalHostname }}"
           - ""
-          - "Internal Service URL:"
-          - "http://{{ vm_name | default('apache-vm') }}-service.{{ vm_namespace | default('vm-migration-test') }}.svc.cluster.local"
+          - "   Internal Service URL:"
+          - "   http://{{ vm_name | default('apache-vm') }}-service.{{ vm_namespace | default('vm-migration-test') }}.svc.cluster.local"
           - ""
-          - "Resource Details:"
-          - "VM Name: {{ vm_name | default('apache-vm') }}"
-          - "Namespace: {{ vm_namespace | default('vm-migration-test') }}"
-          - "Service: {{ vm_name | default('apache-vm') }}-service"
-          - "Route: {{ vm_name | default('apache-vm') }}-route"
+          - "   Resource Details:"
+          - "   VM Name: {{ vm_name | default('apache-vm') }}"
+          - "   Namespace: {{ vm_namespace | default('vm-migration-test') }}"
+          - "   Service: {{ vm_name | default('apache-vm') }}-service"
+          - "   Route: {{ vm_name | default('apache-vm') }}-route"
           - ""
-          - "Route Status: Admitted: {{ route_info.resources[0].status.ingress[0].conditions[0].status | default('Unknown') }}"
-          - ""
-          - "Troubleshooting Commands:"
-          - "oc get svc {{ vm_name | default('apache-vm') }}-service -n {{ vm_namespace | default('vm-migration-test') }}"
-          - "oc get endpoints {{ vm_name | default('apache-vm') }}-service -n {{ vm_namespace | default('vm-migration-test') }}"
-          - "oc get route {{ vm_name | default('apache-vm') }}-route -n {{ vm_namespace | default('vm-migration-test') }}"
-          - "curl -k https://{{ route_info.resources[0].status.ingress[0].routerCanonicalHostname }}"
-          - "=========================================================================="
+          - "====================================================================="
