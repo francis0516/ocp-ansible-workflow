@@ -1,35 +1,52 @@
 ---
 - hosts: localhost
-  gather_facts: false
+  gather_facts: no
   vars:
     vm_name: apache-vm
     vm_namespace: vm-migration-test
-    service_name: "{{ vm_name }}-service"
-    route_name: "{{ vm_name }}-route"
-    retries: 10
-    delay: 5
+    kubeconfig_path: /etc/kubernetes/static-pod-resources/kube-apiserver-certs/secrets/node-kubeconfigs/lb-int.kubeconfig
 
   tasks:
-    - name: Export KUBECONFIG for this session
-      shell: export KUBECONFIG=/etc/kubernetes/static-pod-resources/kube-apiserver-certs/secrets/node-kubeconfigs/localhost.kubeconfig
-      register: kubeconfig_set
+    - name: Verify kubeconfig path exists
+      stat:
+        path: "{{ kubeconfig_path }}"
+      register: kubeconfig_stat
 
-    - name: Ensure Service exists for VM
-      shell: |
-        export KUBECONFIG=/etc/kubernetes/static-pod-resources/kube-apiserver-certs/secrets/node-kubeconfigs/localhost.kubeconfig
-        oc apply -f - 
-      args:
-        stdin: |
+    - name: Fail if kubeconfig file not found
+      fail:
+        msg: "KUBECONFIG not found at {{ kubeconfig_path }}. Please verify the file path."
+      when: not kubeconfig_stat.stat.exists
+
+    - name: Get VM information
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_namespace }}"
+        kubeconfig: "{{ kubeconfig_path }}"
+      register: vm_info
+      ignore_errors: yes
+
+    - name: Display VM labels for debugging
+      debug:
+        msg: "VM Labels: {{ vm_info.resources[0].metadata.labels }}"
+      when: vm_info.resources | length > 0
+
+    - name: Create Service for Apache VM
+      kubernetes.core.k8s:
+        state: present
+        kubeconfig: "{{ kubeconfig_path }}"
+        definition:
           apiVersion: v1
           kind: Service
           metadata:
-            name: {{ service_name }}
-            namespace: {{ vm_namespace }}
+            name: "{{ vm_name }}-service"
+            namespace: "{{ vm_namespace }}"
             labels:
-              app: {{ vm_name }}
+              app: "{{ vm_name }}"
           spec:
             selector:
-              vm.kubevirt.io/name: {{ vm_name }}
+              vm.kubevirt.io/name: "{{ vm_name }}"
             ports:
               - name: http
                 protocol: TCP
@@ -37,23 +54,22 @@
                 targetPort: 80
             type: ClusterIP
 
-    - name: Ensure Route exists for VM
-      shell: |
-        export KUBECONFIG=/etc/kubernetes/static-pod-resources/kube-apiserver-certs/secrets/node-kubeconfigs/localhost.kubeconfig
-        oc apply -f - 
-      args:
-        stdin: |
+    - name: Create Route for Apache VM
+      kubernetes.core.k8s:
+        state: present
+        kubeconfig: "{{ kubeconfig_path }}"
+        definition:
           apiVersion: route.openshift.io/v1
           kind: Route
           metadata:
-            name: {{ route_name }}
-            namespace: {{ vm_namespace }}
+            name: "{{ vm_name }}-route"
+            namespace: "{{ vm_namespace }}"
             labels:
-              app: {{ vm_name }}
+              app: "{{ vm_name }}"
           spec:
             to:
               kind: Service
-              name: {{ service_name }}
+              name: "{{ vm_name }}-service"
               weight: 100
             port:
               targetPort: http
@@ -62,17 +78,22 @@
               insecureEdgeTerminationPolicy: Redirect
             wildcardPolicy: None
 
-    - name: Get external route host
-      shell: |
-        export KUBECONFIG=/etc/kubernetes/static-pod-resources/kube-apiserver-certs/secrets/node-kubeconfigs/localhost.kubeconfig
-        oc get route {{ route_name }} -n {{ vm_namespace }} -o jsonpath='{.spec.host}'
-      register: external_route
-      retries: "{{ retries }}"
-      delay: "{{ delay }}"
-      until: external_route.stdout != ""
+    - name: Wait for Route to be ready
+      kubernetes.core.k8s_info:
+        api_version: route.openshift.io/v1
+        kind: Route
+        name: "{{ vm_name }}-route"
+        namespace: "{{ vm_namespace }}"
+        kubeconfig: "{{ kubeconfig_path }}"
+      register: route_info
+      until: route_info.resources | length > 0 and route_info.resources[0].spec.host is defined
+      retries: 10
+      delay: 3
 
-    - name: Display internal and external URLs
+    - name: Display internal and external route URLs
       debug:
         msg:
-          - "Internal Service URL: http://{{ service_name }}.{{ vm_namespace }}.svc.cluster.local"
-          - "External Route URL: https://{{ external_route.stdout }}"
+          - "=============================================================="
+          - "Internal URL:  http://{{ vm_name }}-service.{{ vm_namespace }}.svc.cluster.local"
+          - "External URL:  https://{{ route_info.resources[0].spec.host }}"
+          - "=============================================================="
