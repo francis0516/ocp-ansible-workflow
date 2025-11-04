@@ -19,16 +19,13 @@
     cloud_init_password: password
 
     # Network Configuration
-    network_type: masquerade  # Use Masquerade networking
+    network_type: masquerade
 
     # Timing Configuration
-    ip_poll_interval: 10        # Seconds between IP checks
-    max_ip_retries: 18          # Max retries (18 * 10 = 3 minutes)
+    ip_poll_interval: 10
+    max_ip_retries: 18
 
   tasks:
-    # ==========================================================================
-    # STEP 1: DISPLAY CONFIGURATION
-    # ==========================================================================
     - name: Display VM configuration
       debug:
         msg:
@@ -41,9 +38,6 @@
           - "Network: {{ network_type }}"
           - "=========================================="
 
-    # ==========================================================================
-    # STEP 2: CREATE VIRTUAL MACHINE
-    # ==========================================================================
     - name: Provision Virtual Machine in OpenShift
       kubernetes.core.k8s:
         state: present
@@ -131,7 +125,7 @@
       when: vm_creation.changed
 
     # ==========================================================================
-    # STEP 3: WAIT FOR DATAVOLUME
+    # Wait for DataVolume
     # ==========================================================================
     - name: Wait for DataVolume to be ready
       kubernetes.core.k8s_info:
@@ -152,7 +146,7 @@
         msg: "DataVolume ready (Phase: {{ dv_info.resources[0].status.phase }})"
 
     # ==========================================================================
-    # STEP 4: WAIT FOR VM TO BE RUNNING
+    # Wait for VM to be running
     # ==========================================================================
     - name: Wait for VM to be running
       kubernetes.core.k8s_info:
@@ -173,15 +167,17 @@
         msg: "VM {{ vm_name }} is running, waiting for IPv4 address..."
 
     # ==========================================================================
-    # STEP 5: INITIALIZE VARIABLES FOR NETWORK
+    # Initialize IPv4 variables
     # ==========================================================================
-    - name: Initialize IPv4 variables
+    - name: Initialize variables
       set_fact:
         vm_ipv4_addresses: []
-        vm_ip: "No IPv4 assigned"
-        all_ips: []
+        vm_ip: ""
 
-    - name: Wait for VM interfaces to report IP
+    # ==========================================================================
+    # Poll for IPv4 via guest agent
+    # ==========================================================================
+    - name: Poll for IPv4 via guest agent
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
         kind: VirtualMachineInstance
@@ -209,55 +205,55 @@
             select('match', '^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$') |
             list
           }}
-        vm_ip: "{{ vm_ipv4_addresses[0] if vm_ipv4_addresses | length > 0 else 'No IPv4 assigned' }}"
+        vm_ip: "{{ vm_ipv4_addresses[0] if vm_ipv4_addresses | length > 0 else '' }}"
 
-    - name: Display network information
+    # ==========================================================================
+    # SSH fallback using vm_ip
+    # ==========================================================================
+    - name: Wait for SSH to be available
+      wait_for:
+        host: "{{ vm_ip }}"
+        port: 22
+        timeout: 120
+        delay: 10
+      when: vm_ip != ''
+      register: ssh_available
+      ignore_errors: true
+
+    - name: SSH fallback to extract IPv4 (if guest agent failed)
+      shell: |
+        sshpass -p '{{ cloud_init_password }}' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 root@{{ vm_ip }} "ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1"
+      register: ssh_ipv4
+      when:
+        - vm_ip != ''
+        - ssh_available is succeeded
+      ignore_errors: true
+      changed_when: false
+
+    - name: Update vm_ip from SSH fallback if needed
+      set_fact:
+        vm_ip: "{{ ssh_ipv4.stdout | trim }}"
+      when:
+        - ssh_ipv4 is defined
+        - ssh_ipv4.rc == 0
+        - ssh_ipv4.stdout | trim != ''
+
+    - name: Display final VM IP
       debug:
-        msg:
-          - "================================================"
-          - "Network Information for {{ vm_name }}"
-          - "================================================"
-          - "All IPs detected: {{ vm_ipv4_addresses | join(', ') if vm_ipv4_addresses | length > 0 else 'None' }}"
-          - "Selected IPv4: {{ vm_ip }}"
-          - "================================================"
+        msg: "VM IP Address: {{ vm_ip }}"
 
     - name: Fail if no IPv4 address obtained
       fail:
-        msg: |
-          ========================================
-          ERROR: No IPv4 address could be obtained
-          ========================================
-          VM Name: {{ vm_name }}
-          Guest Agent: Failed to report IPv4
-          ROOT CAUSE: Network misconfiguration or DHCP failed.
-      when: vm_ip == 'No IPv4 assigned'
+        msg: "ERROR: No IPv4 address could be obtained for VM {{ vm_name }}"
+      when: vm_ip == ''
 
     # ==========================================================================
-    # STEP 6: EXPORT VARIABLES
+    # Export variables
     # ==========================================================================
-    - name: Export variables for workflow
+    - name: Export variables
       set_stats:
         data:
           vm_ip: "{{ vm_ip }}"
-          vm_ipv4: "{{ vm_ipv4_addresses | join(',') }}"
           vm_name: "{{ vm_name }}"
           vm_project: "{{ vm_project }}"
         per_host: no
-
-    # ==========================================================================
-    # STEP 7: DEPLOYMENT SUMMARY
-    # ==========================================================================
-    - name: Deployment summary
-      debug:
-        msg:
-          - "=========================================="
-          - "VM Deployment Complete!"
-          - "=========================================="
-          - "VM Name: {{ vm_name }}"
-          - "Namespace: {{ vm_project }}"
-          - "IPv4 Address: {{ vm_ip }}"
-          - "All IPv4s: {{ vm_ipv4_addresses | join(', ') }}"
-          - "Username: root"
-          - "Password: {{ cloud_init_password }}"
-          - "Network: {{ network_type }}"
-          - "=========================================="
