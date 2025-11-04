@@ -1,25 +1,62 @@
 ---
-- name: Create Route and Fetch VM URLs
-  hosts: localhost
+- hosts: localhost
   gather_facts: false
-  environment:
-    KUBECONFIG: /etc/kubernetes/static-pod-resources/kube-apiserver-certs/secrets/node-kubeconfigs/localhost.kubeconfig
   vars:
     vm_name: apache-vm
     vm_namespace: vm-migration-test
     service_name: "{{ vm_name }}-service"
     route_name: "{{ vm_name }}-route"
-    retries: 5
-    delay: 10
+    retries: 10
+    delay: 5
+  environment:
+    KUBECONFIG: /etc/kubernetes/static-pod-resources/kube-apiserver-certs/secrets/node-kubeconfigs/localhost.kubeconfig
 
   tasks:
+    - name: Ensure Service exists for VM
+      command: >
+        oc apply -f - 
+      args:
+        stdin: |
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: {{ service_name }}
+            namespace: {{ vm_namespace }}
+            labels:
+              app: {{ vm_name }}
+          spec:
+            selector:
+              vm.kubevirt.io/name: {{ vm_name }}
+            ports:
+              - name: http
+                protocol: TCP
+                port: 80
+                targetPort: 80
+            type: ClusterIP
 
-    - name: Get internal service ClusterIP
-      command: "oc get svc {{ service_name }} -n {{ vm_namespace }} -o jsonpath='{.spec.clusterIP}'"
-      register: internal_ip
-      retries: "{{ retries }}"
-      delay: "{{ delay }}"
-      until: internal_ip.stdout != ""
+    - name: Ensure Route exists for VM
+      command: >
+        oc apply -f - 
+      args:
+        stdin: |
+          apiVersion: route.openshift.io/v1
+          kind: Route
+          metadata:
+            name: {{ route_name }}
+            namespace: {{ vm_namespace }}
+            labels:
+              app: {{ vm_name }}
+          spec:
+            to:
+              kind: Service
+              name: {{ service_name }}
+              weight: 100
+            port:
+              targetPort: http
+            tls:
+              termination: edge
+              insecureEdgeTerminationPolicy: Redirect
+            wildcardPolicy: None
 
     - name: Get external route host
       command: "oc get route {{ route_name }} -n {{ vm_namespace }} -o jsonpath='{.spec.host}'"
@@ -31,5 +68,5 @@
     - name: Display internal and external URLs
       debug:
         msg:
-          - "Internal Service URL: http://{{ internal_ip.stdout }}"
+          - "Internal Service URL: http://{{ service_name }}.{{ vm_namespace }}.svc.cluster.local"
           - "External Route URL: https://{{ external_route.stdout }}"
