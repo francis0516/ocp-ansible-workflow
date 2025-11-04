@@ -6,12 +6,10 @@
     vm_namespace: vm-migration-test
     kubeconfig_path: /home/hogege/kubeconfig
 
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+
   tasks:
-
-    - name: Ensure KUBECONFIG is exported
-      ansible.builtin.set_env:
-        KUBECONFIG: "{{ kubeconfig_path }}"
-
     - name: Get VM information
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
@@ -81,26 +79,8 @@
       retries: 10
       delay: 3
 
-    - name: Get Route status
-      kubernetes.core.k8s_info:
-        api_version: route.openshift.io/v1
-        kind: Route
-        name: "{{ vm_name }}-route"
-        namespace: "{{ vm_namespace }}"
-      register: route_status
-
-    - name: Display deployment information
+    - name: Display External and Internal URLs
       debug:
         msg:
-          - "==========================================================================="
-          - "Henogez WebServer Route Created Successfully!"
-          - "==========================================================================="
-          - "Access your web server at:"
-          - "External URL (HTTPS): https://{{ route_info.resources[0].spec.host }}"
-          - "External URL (HTTP - will redirect): http://{{ route_info.resources[0].spec.host }}"
+          - "External URL: https://{{ route_info.resources[0].spec.host }}"
           - "Internal Service URL: http://{{ vm_name }}-service.{{ vm_namespace }}.svc.cluster.local"
-          - "Namespace: {{ vm_namespace }}"
-          - "Service: {{ vm_name }}-service"
-          - "Route: {{ vm_name }}-route"
-          - "Route Status Admitted: {{ route_status.resources[0].status.ingress[0].conditions[0].status | default('Unknown') }}"
-          - "==========================================================================="
