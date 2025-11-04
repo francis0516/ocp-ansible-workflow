@@ -98,7 +98,11 @@
                     interfaces:
                       - name: br-ex-net
                         bridge: {}
+                      - name: default
+                        masquerade: {}
                 networks:
+                  - name: default
+                    pod: {}
                   - name: br-ex-net
                     multus:
                       networkName: "{{ vm_project }}/{{ network_attachment }}"
