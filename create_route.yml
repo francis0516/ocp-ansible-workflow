@@ -6,7 +6,8 @@
     default_vm_name: "apache-vm"
     default_vm_namespace: "vm-migration-test"
     retries: 10
-    delay: 3
+    delay: 5
+    kubeconfig_path: "/etc/kubernetes/static-pod-resources/kube-apiserver-certs/secrets/node-kubeconfigs/localhost.kubeconfig"
 
   tasks:
 
@@ -16,10 +17,8 @@
         vm_namespace: "{{ vm_namespace | default(default_vm_namespace) }}"
 
     - name: Ensure KUBECONFIG is set
-      ansible.builtin.shell: |
-        export KUBECONFIG=/etc/kubernetes/static-pod-resources/kube-apiserver-certs/secrets/node-kubeconfigs/localhost.kubeconfig
-      args:
-        executable: /bin/bash
+      ansible.builtin.shell: "export KUBECONFIG={{ kubeconfig_path }}"
+      changed_when: false
 
     - name: Get VM information
       kubernetes.core.k8s_info:
@@ -28,14 +27,17 @@
         name: "{{ vm_name }}"
         namespace: "{{ vm_namespace }}"
       register: vm_info
-      retries: "{{ retries }}"
-      delay: "{{ delay }}"
-      until: (vm_info.resources | default([])) | length > 0
+      ignore_errors: yes
 
     - name: Fail if VM does not exist
       fail:
         msg: "❌ VM '{{ vm_name }}' not found in namespace '{{ vm_namespace }}'."
       when: (vm_info.resources | default([])) | length == 0
+
+    - name: Display VM labels for debugging
+      debug:
+        msg: "VM Labels: {{ (vm_info.resources | default([{}]))[0].metadata.labels | default({}) }}"
+      when: (vm_info.resources | default([])) | length > 0
 
     - name: Create Service for Apache VM
       kubernetes.core.k8s:
@@ -57,6 +59,22 @@
                 port: 80
                 targetPort: 80
             type: ClusterIP
+
+    - name: Wait until the Service has at least one endpoint
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Endpoints
+        name: "{{ vm_name }}-service"
+        namespace: "{{ vm_namespace }}"
+      register: service_endpoints
+      retries: "{{ retries }}"
+      delay: "{{ delay }}"
+      until: (service_endpoints.resources | default([{}]))[0].subsets is defined and
+             (service_endpoints.resources | default([{}]))[0].subsets | length > 0
+
+    - name: Display Service endpoint status
+      debug:
+        msg: "Service Endpoints: {{ (service_endpoints.resources | default([{}]))[0].subsets | default([]) }}"
 
     - name: Create Route for Apache VM
       kubernetes.core.k8s:
@@ -81,7 +99,7 @@
               insecureEdgeTerminationPolicy: Redirect
             wildcardPolicy: None
 
-    - name: Wait for Route to be admitted
+    - name: Wait for Route to be ready
       kubernetes.core.k8s_info:
         api_version: route.openshift.io/v1
         kind: Route
@@ -90,7 +108,7 @@
       register: route_info
       retries: "{{ retries }}"
       delay: "{{ delay }}"
-      until: (route_info.resources | default([{}]))[0].status.ingress is defined
+      until: (route_info.resources | default([{}]))[0].spec.host is defined
 
     - name: Get Route status details
       kubernetes.core.k8s_info:
@@ -100,18 +118,20 @@
         namespace: "{{ vm_namespace }}"
       register: route_status
 
-    - name: Display deployment information using Route URL
+    - name: Display deployment information
       debug:
         msg:
           - "==========================================================================="
           - "✅ Henogez WebServer Route Created Successfully!"
           - "==========================================================================="
+          - "   Access your web server at:"
           - "   External URL (HTTPS): https://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
           - "   External URL (HTTP - will redirect): http://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
-          - "-------------------------------------------------------------------"
-          - " VM Name: {{ vm_name }}"
-          - " Namespace: {{ vm_namespace }}"
-          - " Service: {{ vm_name }}-service"
-          - " Route: {{ vm_name }}-route"
-          - " ✅ Route Status: Admitted: {{ (route_status.resources | default([{}]))[0].status.ingress[0].conditions[0].status | default('Unknown') }}"
+          - "   Internal Service: http://{{ vm_name }}-service.{{ vm_namespace }}.svc.cluster.local"
+          - "   Resource Details:"
+          - "   VM Name: {{ vm_name }}"
+          - "   Namespace: {{ vm_namespace }}"
+          - "   Service: {{ vm_name }}-service"
+          - "   Route: {{ vm_name }}-route"
+          - "   Route Status: Admitted: {{ (route_status.resources | default([{}]))[0].status.ingress[0].conditions[0].status | default('Unknown') }}"
           - "==========================================================================="
