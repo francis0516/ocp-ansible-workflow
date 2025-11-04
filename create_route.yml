@@ -3,13 +3,11 @@
   gather_facts: false
 
   vars:
-    # ✅ Define clean defaults without self-reference
     default_vm_name: "apache-vm"
     default_vm_namespace: "vm-migration-test"
 
   tasks:
 
-    # ✅ Set VM name and namespace safely
     - name: Set effective VM name and namespace
       set_fact:
         vm_name: "{{ vm_name | default(default_vm_name) }}"
@@ -34,20 +32,12 @@
         msg: "VM Labels: {{ (vm_info.resources | default([{}]))[0].metadata.labels | default({}) }}"
       when: (vm_info.resources | default([])) | length > 0
 
-    # ✅ Fetch VM IPv4 from first interface with IPv4 (eth0)
-    - name: Fetch VM IPv4 from first interface with IPv4
+    - name: Fetch VM IPv4 from Configure LAMP
       set_fact:
-        vm_ipv4: "{{ (vm_info.resources[0].status.interfaces | selectattr('name','equalto','eth0') | list)[0].ip }}"
-      when: (vm_info.resources | length > 0) and (vm_info.resources[0].status.interfaces is defined)
-      ignore_errors: yes
+        vm_ip: "{{ hostvars['localhost']['vm_ip'] }}"
+      when: hostvars['localhost']['vm_ip'] is defined
 
-    - name: Display fetched VM IPv4
-      debug:
-        msg: "Fetched VM IPv4 is {{ vm_ipv4 }}"
-      when: vm_ipv4 is defined
-
-    # ✅ Create Service for Apache VM
-    - name: Create Service for Apache VM
+    - name: Create Service for Apache VM using external VM IP
       kubernetes.core.k8s:
         state: present
         definition:
@@ -59,14 +49,15 @@
             labels:
               app: "{{ vm_name }}"
           spec:
-            selector:
-              vm.kubevirt.io/name: "{{ vm_name }}"
+            type: ClusterIP
             ports:
               - name: http
                 protocol: TCP
                 port: 80
                 targetPort: 80
-            type: ClusterIP
+            externalIPs:
+              - "{{ vm_ip }}"         # ✅ Use VM's external IP from Configure LAMP
+            selector: {}               # No selector, using externalIPs
 
     - name: Verify Service endpoints
       kubernetes.core.k8s_info:
@@ -86,13 +77,12 @@
 
     - name: Display warning if no endpoints found
       debug:
-        msg: "⚠ Warning: No endpoints found! Check if VM selector matches."
+        msg: "⚠ Warning: No endpoints found! OpenShift router will reach VM via external IP."
       when:
         - (service_endpoints.resources | default([])) | length == 0 or
           service_endpoints.resources[0].subsets is not defined or
           service_endpoints.resources[0].subsets | length == 0
 
-    # ✅ Create Route for Apache VM
     - name: Create Route for Apache VM
       kubernetes.core.k8s:
         state: present
@@ -135,7 +125,6 @@
         namespace: "{{ vm_namespace }}"
       register: route_status
 
-    # ✅ Display deployment information with VM IPv4
     - name: Display deployment information
       debug:
         msg:
@@ -145,7 +134,7 @@
           - "   Access your web server at:"
           - "   External URL (HTTPS): https://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
           - "   External URL (HTTP - will redirect): http://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
-          - "   Internal VM IP: http://{{ vm_ipv4 | default('N/A') }}"
+          - "   Internal VM IP: http://{{ vm_ip }}"
           - "   Internal Service: http://{{ vm_name }}-service.{{ vm_namespace }}.svc.cluster.local"
           - "   Resource Details:"
           - "   VM Name: {{ vm_name }}"
