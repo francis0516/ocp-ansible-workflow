@@ -1,7 +1,6 @@
 ---
 - hosts: localhost
   gather_facts: false
-
   vars:
     default_vm_name: "apache-vm"
     default_vm_namespace: "vm-migration-test"
@@ -9,16 +8,16 @@
     delay: 5
 
   tasks:
-
     - name: Set effective VM name and namespace
       set_fact:
         vm_name: "{{ vm_name | default(default_vm_name) }}"
         vm_namespace: "{{ vm_namespace | default(default_vm_namespace) }}"
 
     - name: Ensure KUBECONFIG is set
-      ansible.builtin.shell: "export KUBECONFIG=/etc/kubernetes/static-pod-resources/kube-apiserver-certs/secrets/node-kubeconfigs/localhost.kubeconfig"
-      environment:
-        KUBECONFIG: "/etc/kubernetes/static-pod-resources/kube-apiserver-certs/secrets/node-kubeconfigs/localhost.kubeconfig"
+      ansible.builtin.shell: |
+        export KUBECONFIG=/etc/kubernetes/static-pod-resources/kube-apiserver-certs/secrets/node-kubeconfigs/localhost.kubeconfig
+      args:
+        executable: /bin/bash
 
     - name: Get VM information
       kubernetes.core.k8s_info:
@@ -27,12 +26,7 @@
         name: "{{ vm_name }}"
         namespace: "{{ vm_namespace }}"
       register: vm_info
-      ignore_errors: yes
-
-    - name: Fail if VM does not exist
-      fail:
-        msg: "❌ VM '{{ vm_name }}' not found in namespace '{{ vm_namespace }}'."
-      when: (vm_info.resources | default([])) | length == 0
+      failed_when: vm_info.resources | length == 0
 
     - name: Get VMI information
       kubernetes.core.k8s_info:
@@ -43,36 +37,15 @@
       register: vmi_info
       retries: "{{ retries }}"
       delay: "{{ delay }}"
-      until: vmi_info.resources | length > 0 and
-             vmi_info.resources[0].status.phase == "Running"
-
-    - name: Wait for VMI to have at least one interface with IPv4
-      kubernetes.core.k8s_info:
-        api_version: kubevirt.io/v1
-        kind: VirtualMachineInstance
-        name: "{{ vm_name }}"
-        namespace: "{{ vm_namespace }}"
-      register: vmi_info_with_ip
-      retries: "{{ retries }}"
-      delay: "{{ delay }}"
-      until: vmi_info_with_ip.resources | length > 0 and
-             vmi_info_with_ip.resources[0].status.interfaces is defined and
-             (vmi_info_with_ip.resources[0].status.interfaces
-              | selectattr('ipAddresses', 'defined') | list | length) > 0
+      until: vmi_info.resources | length > 0 and vmi_info.resources[0].status.phase == "Running"
 
     - name: Fetch first IPv4 address from VM interfaces
       set_fact:
-        vm_ip: >-
-          {{
-            (
-              vmi_info_with_ip.resources[0].status.interfaces
-              | selectattr('ipAddresses', 'defined')
-              | map(attribute='ipAddresses')
-              | map('first')
-              | select('match', '^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
-              | first
-            )
-          }}
+        vm_ip: "{{ (vmi_info.resources[0].status.interfaces | selectattr('ipAddress','defined') | list)[0].ipAddress }}"
+      when: vmi_info.resources[0].status.interfaces is defined
+      retries: "{{ retries }}"
+      delay: "{{ delay }}"
+      until: vm_ip is defined
 
     - name: Create Service for Apache VM
       kubernetes.core.k8s:
@@ -118,7 +91,7 @@
               insecureEdgeTerminationPolicy: Redirect
             wildcardPolicy: None
 
-    - name: Wait for Route to be ready
+    - name: Wait for Route to have a host assigned
       kubernetes.core.k8s_info:
         api_version: route.openshift.io/v1
         kind: Route
@@ -127,30 +100,33 @@
       register: route_info
       retries: "{{ retries }}"
       delay: "{{ delay }}"
-      until: (route_info.resources | default([{}]))[0].spec.host is defined
+      until: route_info.resources | length > 0 and route_info.resources[0].spec.host is defined
 
-    - name: Get Route status details
+    - name: Verify Service endpoint is ready
       kubernetes.core.k8s_info:
-        api_version: route.openshift.io/v1
-        kind: Route
-        name: "{{ vm_name }}-route"
+        api_version: v1
+        kind: Endpoints
+        name: "{{ vm_name }}-service"
         namespace: "{{ vm_namespace }}"
-      register: route_status
+      register: service_endpoints
+      retries: "{{ retries }}"
+      delay: "{{ delay }}"
+      until: service_endpoints.resources[0].subsets is defined and service_endpoints.resources[0].subsets | length > 0
 
     - name: Display deployment information
       debug:
         msg:
           - "==========================================================================="
-          - "✅ Henogez WebServer Route Created Successfully!"
+          - "✅ Henogez WebServer Deployment Details"
           - "==========================================================================="
-          - "   External URL (HTTPS): https://{{ (route_info.resources | default([{}]))[0].spec.host | default(vm_ip) }}"
-          - "   External URL (HTTP - will redirect): http://{{ (route_info.resources | default([{}]))[0].spec.host | default(vm_ip) }}"
-          - "   Internal VM IP: http://{{ vm_ip }}"
-          - "   Internal Service: http://{{ vm_name }}-service.{{ vm_namespace }}.svc.cluster.local"
-          - "   Resource Details:"
-          - "   VM Name: {{ vm_name }}"
-          - "   Namespace: {{ vm_namespace }}"
-          - "   Service: {{ vm_name }}-service"
-          - "   Route: {{ vm_name }}-route"
-          - "   ✅ Route Status: Admitted: {{ (route_status.resources | default([{}]))[0].status.ingress[0].conditions[0].status | default('Unknown') }}"
+          - "Internal VM IP: http://{{ vm_ip | default('N/A') }}"
+          - "Internal Service: http://{{ vm_name }}-service.{{ vm_namespace }}.svc.cluster.local"
+          - "External URL (HTTPS): https://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
+          - "External URL (HTTP - will redirect): http://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
+          - "-------------------------------------------------------------------"
+          - "VM Name: {{ vm_name }}"
+          - "Namespace: {{ vm_namespace }}"
+          - "Service: {{ vm_name }}-service"
+          - "Route: {{ vm_name }}-route"
+          - "✅ Route Status: Admitted: {{ (route_info.resources | default([{}]))[0].status.ingress[0].conditions[0].status | default('Unknown') }}"
           - "==========================================================================="
