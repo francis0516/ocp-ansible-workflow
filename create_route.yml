@@ -1,4 +1,3 @@
----
 - hosts: localhost
   gather_facts: false
 
@@ -13,6 +12,20 @@
         vm_name: "{{ vm_name | default(default_vm_name) }}"
         vm_namespace: "{{ vm_namespace | default(default_vm_namespace) }}"
 
+    - name: Get VM information
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_namespace }}"
+      register: vm_info
+      ignore_errors: yes
+
+    - name: Fail if VM does not exist
+      fail:
+        msg: "❌ VM '{{ vm_name }}' not found in namespace '{{ vm_namespace }}'."
+      when: (vm_info.resources | default([])) | length == 0
+
     - name: Get VMI information
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
@@ -20,22 +33,31 @@
         name: "{{ vm_name }}"
         namespace: "{{ vm_namespace }}"
       register: vmi_info
-      ignore_errors: yes
 
-    - name: Fail if VMI does not exist
-      fail:
-        msg: "❌ VMI '{{ vm_name }}' not found in namespace '{{ vm_namespace }}'."
-      when: (vmi_info.resources | default([])) | length == 0
-
-    - name: Fetch VM IPv4 from eth0
-      set_fact:
-        vm_ip: "{{ (vmi_info.resources[0].status.interfaces | selectattr('name','equalto','eth0') | list)[0].ipAddresses[0] }}"
-
-    - name: Display VM IPv4
+    - name: Debug VMI info
       debug:
-        msg: "VM IPv4 to use for Service: {{ vm_ip }}"
+        var: vmi_info
 
-    - name: Create Service with externalIPs
+    - name: Fetch VM IPv4 from first interface with IPv4
+      set_fact:
+        vm_ip: >-
+          {{ (vmi_info.resources[0].status.interfaces
+               | selectattr('ipAddresses','defined')
+               | map(attribute='ipAddresses')
+               | sum(start=[])
+               | select('match','^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$')
+               | list)[0] }}
+      when: (vmi_info.resources | length > 0) and
+            (vmi_info.resources[0].status.interfaces is defined)
+
+    - name: Display fetched VM IPv4
+      debug:
+        msg: "VM IPv4 Address: {{ vm_ip }}"
+
+    # -------------------------------
+    # Service creation now uses vm_ip if needed
+    # -------------------------------
+    - name: Create Service for Apache VM
       kubernetes.core.k8s:
         state: present
         definition:
@@ -47,14 +69,14 @@
             labels:
               app: "{{ vm_name }}"
           spec:
+            selector:
+              vm.kubevirt.io/name: "{{ vm_name }}"
             ports:
               - name: http
                 protocol: TCP
                 port: 80
                 targetPort: 80
             type: ClusterIP
-            externalIPs:
-              - "{{ vm_ip }}"
 
     - name: Create Route for Apache VM
       kubernetes.core.k8s:
@@ -78,31 +100,3 @@
               termination: edge
               insecureEdgeTerminationPolicy: Redirect
             wildcardPolicy: None
-
-    - name: Wait for Route to be ready
-      kubernetes.core.k8s_info:
-        api_version: route.openshift.io/v1
-        kind: Route
-        name: "{{ vm_name }}-route"
-        namespace: "{{ vm_namespace }}"
-      register: route_info
-      until: (route_info.resources | default([{}]))[0].spec.host is defined
-      retries: 10
-      delay: 2
-
-    - name: Display deployment information
-      debug:
-        msg:
-          - "==========================================================================="
-          - "✅ Henogez WebServer Route Created Successfully!"
-          - "==========================================================================="
-          - "   Access your web server at:"
-          - "   External URL (HTTPS): https://{{ route_info.resources[0].spec.host }}"
-          - "   External URL (HTTP - will redirect): http://{{ route_info.resources[0].spec.host }}"
-          - "   Internal Service: http://{{ vm_name }}-service.{{ vm_namespace }}.svc.cluster.local"
-          - "   Resource Details:"
-          - "   VM Name: {{ vm_name }}"
-          - "   Namespace: {{ vm_namespace }}"
-          - "   Service: {{ vm_name }}-service"
-          - "   Route: {{ vm_name }}-route"
-          - "==========================================================================="
