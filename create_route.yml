@@ -6,7 +6,7 @@
   vars:
     default_vm_name: "apache-vm"
     default_vm_namespace: "vm-migration-test"
-    vm_ip: "10.0.0.130"  # override at runtime
+    vm_ip: "10.0.0.107"  # override at runtime
     vm_user: "root"
     vm_password: "password"
 
