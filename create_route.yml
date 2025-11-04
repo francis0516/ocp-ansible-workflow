@@ -3,11 +3,13 @@
   gather_facts: false
 
   vars:
+    # ✅ Define clean defaults without self-reference
     default_vm_name: "apache-vm"
     default_vm_namespace: "vm-migration-test"
 
   tasks:
 
+    # ✅ Set VM name and namespace safely
     - name: Set effective VM name and namespace
       set_fact:
         vm_name: "{{ vm_name | default(default_vm_name) }}"
@@ -27,32 +29,24 @@
         msg: "❌ VM '{{ vm_name }}' not found in namespace '{{ vm_namespace }}'."
       when: (vm_info.resources | default([])) | length == 0
 
-    - name: Get VMI information
-      kubernetes.core.k8s_info:
-        api_version: kubevirt.io/v1
-        kind: VirtualMachineInstance
-        name: "{{ vm_name }}"
-        namespace: "{{ vm_namespace }}"
-      register: vmi_info
-
-    - name: Fetch VM IPv4 from first interface with IPv4 (safe)
-      set_fact:
-        vm_ip: >-
-          {{ (vmi_info.resources[0].status.interfaces
-               | default([]) 
-               | selectattr('ipAddresses','defined')
-               | map(attribute='ipAddresses')
-               | sum(start=[])
-               | select('match','^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$')
-               | list
-              )[0] | default('0.0.0.0') }}
-      when: (vmi_info.resources | length > 0)
-
-    - name: Debug VM IPv4
+    - name: Display VM labels for debugging
       debug:
-        msg: "VM IPv4 Address: {{ vm_ip }}"
-      failed_when: vm_ip == '0.0.0.0'
+        msg: "VM Labels: {{ (vm_info.resources | default([{}]))[0].metadata.labels | default({}) }}"
+      when: (vm_info.resources | default([])) | length > 0
 
+    # ✅ Fetch VM IPv4 from first interface with IPv4 (eth0)
+    - name: Fetch VM IPv4 from first interface with IPv4
+      set_fact:
+        vm_ipv4: "{{ (vm_info.resources[0].status.interfaces | selectattr('name','equalto','eth0') | list)[0].ip }}"
+      when: (vm_info.resources | length > 0) and (vm_info.resources[0].status.interfaces is defined)
+      ignore_errors: yes
+
+    - name: Display fetched VM IPv4
+      debug:
+        msg: "Fetched VM IPv4 is {{ vm_ipv4 }}"
+      when: vm_ipv4 is defined
+
+    # ✅ Create Service for Apache VM
     - name: Create Service for Apache VM
       kubernetes.core.k8s:
         state: present
@@ -98,7 +92,8 @@
           service_endpoints.resources[0].subsets is not defined or
           service_endpoints.resources[0].subsets | length == 0
 
-    - name: Create Route for Apache VM using VM IPv4
+    # ✅ Create Route for Apache VM
+    - name: Create Route for Apache VM
       kubernetes.core.k8s:
         state: present
         definition:
@@ -116,7 +111,6 @@
               weight: 100
             port:
               targetPort: http
-            host: "{{ vm_ip }}"   # Use the fetched IPv4
             tls:
               termination: edge
               insecureEdgeTerminationPolicy: Redirect
@@ -141,6 +135,7 @@
         namespace: "{{ vm_namespace }}"
       register: route_status
 
+    # ✅ Display deployment information with VM IPv4
     - name: Display deployment information
       debug:
         msg:
@@ -150,6 +145,7 @@
           - "   Access your web server at:"
           - "   External URL (HTTPS): https://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
           - "   External URL (HTTP - will redirect): http://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
+          - "   Internal VM IP: http://{{ vm_ipv4 | default('N/A') }}"
           - "   Internal Service: http://{{ vm_name }}-service.{{ vm_namespace }}.svc.cluster.local"
           - "   Resource Details:"
           - "   VM Name: {{ vm_name }}"
