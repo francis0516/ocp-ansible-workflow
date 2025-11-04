@@ -1,14 +1,11 @@
 ---
-- name: Configure VM network and create OpenShift route
+- name: Create Service and Route for Apache VM using dynamic IPv4
   hosts: localhost
   gather_facts: false
 
   vars:
     default_vm_name: "apache-vm"
     default_vm_namespace: "vm-migration-test"
-    vm_ip: "10.0.0.107"  # override at runtime
-    vm_user: "root"
-    vm_password: "password"
 
   tasks:
 
@@ -17,46 +14,20 @@
         vm_name: "{{ vm_name | default(default_vm_name) }}"
         vm_namespace: "{{ vm_namespace | default(default_vm_namespace) }}"
 
-    - name: Add VM to dynamic inventory
-      add_host:
-        name: "{{ vm_name }}"
-        ansible_host: "{{ vm_ip }}"
-        ansible_user: "{{ vm_user }}"
-        ansible_password: "{{ vm_password }}"
-        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
-        groups: dynamic_vms
+    - name: Get VM IPv4 from dynamic inventory
+      set_fact:
+        vm_ip: "{{ hostvars['apache-vm'].ansible_default_ipv4.address | default('N/A') }}"
+      when: "'apache-vm' in hostvars"
 
-- hosts: dynamic_vms
-  gather_facts: yes
-  become: yes
+    - name: Fail if VM IP not found
+      fail:
+        msg: "❌ Could not fetch VM IP. Make sure the configure LAMP playbook ran successfully."
+      when: vm_ip == 'N/A'
 
-  tasks:
-    - name: Delete old eth0 connection if exists
-      command: nmcli con delete eth0
-      ignore_errors: yes
+    - name: Display VM IPv4 for debugging
+      debug:
+        msg: "VM {{ vm_name }} IPv4: {{ vm_ip }}"
 
-    - name: Create persistent static eth0 network
-      command: >
-        nmcli connection add type ethernet autoconnect yes con-name eth0 ifname eth0
-        ipv4.addresses {{ vm_ip }}/24
-        ipv4.gateway 10.0.0.1
-        ipv4.dns 10.0.0.17,8.8.8.8
-        ipv4.dns-search ocp4.henogez.com
-        ipv4.method manual
-      ignore_errors: no
-
-    - name: Bring up eth0 connection
-      command: nmcli connection up eth0
-
-    - name: Restart NetworkManager to apply changes
-      systemd:
-        name: NetworkManager
-        state: restarted
-
-- hosts: localhost
-  gather_facts: false
-
-  tasks:
     - name: Create Service for Apache VM
       kubernetes.core.k8s:
         state: present
@@ -112,12 +83,13 @@
       retries: 10
       delay: 5
 
-    - name: Display deployment information
+    - name: Display Route information
       debug:
         msg:
           - "==========================================================================="
           - "✅ Henogez WebServer Route Created Successfully!"
           - "==========================================================================="
+          - "   VM IPv4: {{ vm_ip }}"
           - "   External URL (HTTPS): https://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
           - "   External URL (HTTP - will redirect): http://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
           - "   Internal Service: http://{{ vm_name }}-service.{{ vm_namespace }}.svc.cluster.local"
