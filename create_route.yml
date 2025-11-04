@@ -1,92 +1,162 @@
 ---
-- name: Create OpenShift Route for VM and Verify Application
-  hosts: localhost
+- hosts: localhost
   gather_facts: false
+  environment:
+    KUBECONFIG: /home/hogege/kubeconfig   # Ensures all kubectl/oc/k8s tasks work
+
   vars:
-    vm_name: apache-vm
-    vm_namespace: vm-migration-test
-    route_name: apache-vm-route
-    service_name: apache-vm-service
-    max_retries: 10
-    retry_delay: 10
+    default_vm_name: "apache-vm"
+    default_vm_namespace: "vm-migration-test"
 
   tasks:
+
     - name: Set effective VM name and namespace
       set_fact:
-        effective_vm_name: "{{ vm_name }}"
-        effective_namespace: "{{ vm_namespace }}"
+        vm_name: "{{ vm_name | default(default_vm_name) }}"
+        vm_namespace: "{{ vm_namespace | default(default_vm_namespace) }}"
+
+    - name: Verify access to cluster
+      command: oc cluster-info
+      register: cluster_info
+      changed_when: false
+
+    - name: Display cluster info
+      debug:
+        msg: "{{ cluster_info.stdout }}"
 
     - name: Get VM information
-      command: oc get vm {{ effective_vm_name }} -n {{ effective_namespace }} -o json
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_namespace }}"
       register: vm_info
-      changed_when: false
-      failed_when: vm_info.rc != 0
+      ignore_errors: yes
 
     - name: Fail if VM does not exist
       fail:
-        msg: "VM {{ effective_vm_name }} not found in namespace {{ effective_namespace }}"
-      when: vm_info.rc != 0
+        msg: "❌ VM '{{ vm_name }}' not found in namespace '{{ vm_namespace }}'."
+      when: (vm_info.resources | default([])) | length == 0
 
-    - name: Fetch VM IPv4 from VMI status
-      command: oc get vmi {{ effective_vm_name }} -n {{ effective_namespace }} -o json
-      register: vmi_info
-      changed_when: false
-      retries: 10
-      delay: 10
-      until: vmi_info.stdout | from_json | json_query('status.interfaces[0].ipAddress') is defined
-
-    - name: Set VM IPv4 fact
+    - name: Fetch VM IPv4 from first interface with IPv4
       set_fact:
-        vm_ipv4: "{{ (vmi_info.stdout | from_json).status.interfaces[0].ipAddress }}"
+        vm_ipv4: >-
+          {{
+            (vm_info.resources[0].status.interfaces
+              | selectattr('ipAddresses', 'defined')
+              | map(attribute='ipAddresses')
+              | map('select', 'match', '^\\d+\\.\\d+\\.\\d+\\.\\d+$')
+              | list
+              | first
+            )
+          }}
+      when: (vm_info.resources | length > 0) and (vm_info.resources[0].status.interfaces is defined)
 
-    - name: Ensure Service exists for VM
-      shell: |
-        oc get svc {{ service_name }} -n {{ effective_namespace }} >/dev/null 2>&1 || \
-        oc expose virtualmachineinstance {{ effective_vm_name }} -n {{ effective_namespace }} --name {{ service_name }} --port=80
-      register: svc_output
-      changed_when: "'created' in svc_output.stdout"
+    - name: Display fetched VM IPv4
+      debug:
+        msg: "✅ VM IPv4: {{ vm_ipv4 | default('N/A') }}"
 
-    - name: Ensure Route exists for VM
-      shell: |
-        oc get route {{ route_name }} -n {{ effective_namespace }} >/dev/null 2>&1 || \
-        oc create route edge {{ route_name }} --service={{ service_name }} --insecure-policy=Redirect --port=http
-      register: route_output
-      changed_when: "'created' in route_output.stdout"
+    - name: Create Service for Apache VM
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: "{{ vm_name }}-service"
+            namespace: "{{ vm_namespace }}"
+            labels:
+              app: "{{ vm_name }}"
+          spec:
+            selector:
+              vm.kubevirt.io/name: "{{ vm_name }}"
+            ports:
+              - name: http
+                protocol: TCP
+                port: 80
+                targetPort: 80
+            type: ClusterIP
 
-    # ✅ FIXED SECTION BELOW
-    - name: Wait for route to be admitted
-      vars:
-        route_check_cmd: >
-          oc get route {{ route_name }} -n {{ effective_namespace }}
-          -o jsonpath='{.status.ingress[0].conditions[?(@.type=="Admitted")].status}'
+    - name: Verify Service endpoints
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Endpoints
+        name: "{{ vm_name }}-service"
+        namespace: "{{ vm_namespace }}"
+      register: service_endpoints
+
+    - name: Display Service endpoint status
+      debug:
+        msg: "Service Endpoints: {{ (service_endpoints.resources | default([{}]))[0].subsets | default([]) }}"
+      when:
+        - (service_endpoints.resources | default([])) | length > 0
+        - (service_endpoints.resources[0].subsets is defined)
+        - (service_endpoints.resources[0].subsets | length > 0)
+
+    - name: Display warning if no endpoints found
+      debug:
+        msg: "⚠ Warning: No endpoints found! Check if VM selector matches."
+      when:
+        - (service_endpoints.resources | default([])) | length == 0 or
+          service_endpoints.resources[0].subsets is not defined or
+          service_endpoints.resources[0].subsets | length == 0
+
+    - name: Create Route for Apache VM
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: route.openshift.io/v1
+          kind: Route
+          metadata:
+            name: "{{ vm_name }}-route"
+            namespace: "{{ vm_namespace }}"
+            labels:
+              app: "{{ vm_name }}"
+          spec:
+            to:
+              kind: Service
+              name: "{{ vm_name }}-service"
+              weight: 100
+            port:
+              targetPort: http
+            tls:
+              termination: edge
+              insecureEdgeTerminationPolicy: Redirect
+            wildcardPolicy: None
+
+    - name: Wait for Route to be ready
+      kubernetes.core.k8s_info:
+        api_version: route.openshift.io/v1
+        kind: Route
+        name: "{{ vm_name }}-route"
+        namespace: "{{ vm_namespace }}"
+      register: route_info
+      until: (route_info.resources | default([{}]))[0].spec.host is defined
+      retries: 10
+      delay: 5
+
+    - name: Get Route status details
+      kubernetes.core.k8s_info:
+        api_version: route.openshift.io/v1
+        kind: Route
+        name: "{{ vm_name }}-route"
+        namespace: "{{ vm_namespace }}"
       register: route_status
-      until: route_status.stdout is search("True")
-      retries: "{{ max_retries }}"
-      delay: "{{ retry_delay }}"
-      ignore_errors: true
-      changed_when: false
-      command: "{{ route_check_cmd }}"
 
-    - name: Get route host
-      command: oc get route {{ route_name }} -n {{ effective_namespace }} -o jsonpath='{.spec.host}'
-      register: route_host
-      changed_when: false
-
-    - name: Display resource summary
+    - name: Display deployment information
       debug:
         msg:
-          - "==================================================================="
-          - " 🌐 Access Information"
-          - "-------------------------------------------------------------------"
-          - " Internal VM IP: http://{{ vm_ipv4 }}"
-          - " Internal Service: http://{{ service_name }}.{{ effective_namespace }}.svc.cluster.local"
-          - " External Route: https://{{ route_host.stdout }}"
-          - "-------------------------------------------------------------------"
-          - " Resource Details:"
-          - " VM Name: {{ effective_vm_name }}"
-          - " Namespace: {{ effective_namespace }}"
-          - " Service: {{ service_name }}"
-          - " Route: {{ route_name }}"
-          - " ------------------------------------------------------------------"
-          - " ✅ Route Status: Admitted: {{ 'True' if 'True' in route_status.stdout else 'False' }}"
-          - "==================================================================="
+          - "==========================================================================="
+          - "✅ Henogez WebServer Route Created Successfully!"
+          - "==========================================================================="
+          - "   External URL (HTTPS): https://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
+          - "   External URL (HTTP - will redirect): http://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
+          - "   Internal VM IP: http://{{ vm_ipv4 | default('N/A') }}"
+          - "   Internal Service: http://{{ vm_name }}-service.{{ vm_namespace }}.svc.cluster.local"
+          - "   Resource Details:"
+          - "   VM Name: {{ vm_name }}"
+          - "   Namespace: {{ vm_namespace }}"
+          - "   Service: {{ vm_name }}-service"
+          - "   Route: {{ vm_name }}-route"
+          - "   Route Status: Admitted: {{ (route_status.resources | default([{}]))[0].status.ingress[0].conditions[0].status | default('Unknown') }}"
+          - "==========================================================================="
