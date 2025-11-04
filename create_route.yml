@@ -2,98 +2,66 @@
 - name: Create Route and Fetch VM Details
   hosts: localhost
   gather_facts: false
+  environment:
+    KUBECONFIG: /etc/kubernetes/static-pod-resources/kube-apiserver-certs/secrets/node-kubeconfigs/localhost.kubeconfig
   vars:
     vm_name: apache-vm
     vm_namespace: vm-migration-test
-    kubeconfig_path: /etc/kubernetes/static-pod-resources/kube-apiserver-certs/secrets/node-kubeconfigs/localhost.kubeconfig
     route_name: "{{ vm_name }}-route"
     service_name: "{{ vm_name }}-service"
     retries: 5
     delay: 10
 
   tasks:
-    - name: Ensure KUBECONFIG is set
-      ansible.builtin.set_env:
-        KUBECONFIG: "{{ kubeconfig_path }}"
+
+    - name: Set effective VM name and namespace
+      set_fact:
+        effective_vm_name: "{{ vm_name }}"
+        effective_namespace: "{{ vm_namespace }}"
 
     - name: Get VMI information
       community.kubernetes.k8s_info:
         api_version: kubevirt.io/v1
         kind: VirtualMachineInstance
-        namespace: "{{ vm_namespace }}"
-        name: "{{ vm_name }}"
+        namespace: "{{ effective_namespace }}"
+        name: "{{ effective_vm_name }}"
       register: vmi_result
       retries: "{{ retries }}"
       delay: "{{ delay }}"
       until: vmi_result.resources | length > 0
 
-    - name: Fail if VM does not exist
-      ansible.builtin.fail:
-        msg: "VM {{ vm_name }} does not exist in namespace {{ vm_namespace }}"
+    - name: Fail if VMI does not exist
+      fail:
+        msg: "The VM {{ effective_vm_name }} does not exist in namespace {{ effective_namespace }}"
       when: vmi_result.resources | length == 0
 
-    - name: Fetch first IPv4 address from VM interfaces or fallback to Service ClusterIP
-      set_fact:
-        vm_ip: >-
-          {{
-            vmi_result.resources[0].status.interfaces[0].ip
-            if (vmi_result.resources[0].status.interfaces is defined and
-                vmi_result.resources[0].status.interfaces | length > 0)
-            else lookup('community.kubernetes.k8s', 
-                        api_version='v1', kind='Service', 
-                        namespace=vm_namespace, 
-                        name=service_name)['spec']['clusterIP']
-          }}
+    - name: Fetch the route URL
+      command: "oc get route {{ route_name }} -n {{ effective_namespace }} -o jsonpath='{.spec.host}'"
+      register: route_result
       retries: "{{ retries }}"
       delay: "{{ delay }}"
-      until: vm_ip is defined
+      until: route_result.stdout != ""
 
-    - name: Create route to VM service
-      community.kubernetes.k8s:
-        state: present
-        definition:
-          apiVersion: route.openshift.io/v1
-          kind: Route
-          metadata:
-            name: "{{ route_name }}"
-            namespace: "{{ vm_namespace }}"
-          spec:
-            to:
-              kind: Service
-              name: "{{ service_name }}"
-            port:
-              targetPort: http
-            tls:
-              termination: edge
-              insecureEdgeTerminationPolicy: Redirect
-      register: route_result
+    - name: Create route if it does not exist
+      command: "oc expose svc {{ service_name }} -n {{ effective_namespace }} --name={{ route_name }} --port=http"
+      register: expose_result
+      failed_when: false
+      changed_when: "'AlreadyExists' not in expose_result.stderr"
 
     - name: Wait for route to be admitted
-      community.kubernetes.k8s_info:
-        api_version: route.openshift.io/v1
-        kind: Route
-        namespace: "{{ vm_namespace }}"
-        name: "{{ route_name }}"
-      register: route_info
+      command: "oc get route {{ route_name }} -n {{ effective_namespace }} -o jsonpath='{.status.ingress[0].conditions[?(@.type==\"Admitted\")].status}'"
+      register: route_status
       retries: "{{ retries }}"
       delay: "{{ delay }}"
-      until: route_info.resources[0].status.ingress is defined and
-             route_info.resources[0].status.ingress[0].conditions[0].status == 'True'
+      until: route_status.stdout == "True"
 
-    - name: Set route URL
-      set_fact:
-        route_url: "http://{{ route_info.resources[0].spec.host }}"
-
-    - name: Display VM and route information
-      ansible.builtin.debug:
+    - name: Display VM and route details
+      debug:
         msg:
-          - "External URL (HTTP/HTTPS): {{ route_url }}"
-          - "Internal VM IP: http://{{ vm_ip }}"
-          - "Internal Service: http://{{ service_name }}.{{ vm_namespace }}.svc.cluster.local"
-          - "-------------------------------------------------------------------"
-          - "VM Name: {{ vm_name }}"
-          - "Namespace: {{ vm_namespace }}"
+          - "External URL (HTTP/HTTPS): https://{{ route_result.stdout }}"
+          - "Resource Details:"
+          - "VM Name: {{ effective_vm_name }}"
+          - "Namespace: {{ effective_namespace }}"
           - "Service: {{ service_name }}"
           - "Route: {{ route_name }}"
           - "✅ Route Status: Admitted: True"
-          - "==================================================================="
