@@ -27,16 +27,38 @@
         msg: "❌ VM '{{ vm_name }}' not found in namespace '{{ vm_namespace }}'."
       when: (vm_info.resources | default([])) | length == 0
 
+    - name: Display VM labels for debugging
+      debug:
+        msg: "VM Labels: {{ (vm_info.resources | default([{}]))[0].metadata.labels | default({}) }}"
+      when: (vm_info.resources | default([])) | length > 0
+
+    # ---------------- Fetch the IPv4 from VMI ----------------
+    - name: Get VMI information
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_namespace }}"
+      register: vmi_info
+      retries: 5
+      delay: 3
+      until: (vmi_info.resources | length) > 0
+
+    - name: Fail if VMI not found
+      fail:
+        msg: "❌ VMI '{{ vm_name }}' not found in namespace '{{ vm_namespace }}'."
+      when: (vmi_info.resources | length) == 0
+
     - name: Fetch VM IPv4 from first interface with IPv4
       set_fact:
         vm_ip: >-
-          {{ (vm_info.resources[0].status.interfaces | selectattr('ipAddress','defined') | list)[0].ipAddress if
-             (vm_info.resources[0].status.interfaces | selectattr('ipAddress','defined') | list | length > 0) else '' }}
-      when: (vm_info.resources | length) > 0
+          {{ (vmi_info.resources[0].status.interfaces | selectattr('ipAddress','defined') | list)[0].ipAddress
+             if (vmi_info.resources[0].status.interfaces | selectattr('ipAddress','defined') | list | length > 0)
+             else '' }}
 
     - name: Fail if VM IPv4 not found
       fail:
-        msg: "❌ VM IPv4 could not be determined."
+        msg: "❌ VM IPv4 could not be determined. Make sure the VMI is running and has an IP."
       when: vm_ip == ''
 
     - name: Create Service for Apache VM
@@ -59,8 +81,6 @@
                 port: 80
                 targetPort: 80
             type: ClusterIP
-            externalIPs:
-              - "{{ vm_ip }}"
 
     - name: Verify Service endpoints
       kubernetes.core.k8s_info:
@@ -134,7 +154,6 @@
           - "==========================================================================="
           - "✅ Henogez WebServer Route Created Successfully!"
           - "==========================================================================="
-          - "   Access your web server at:"
           - "   External URL (HTTPS): https://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
           - "   External URL (HTTP - will redirect): http://{{ (route_info.resources | default([{}]))[0].spec.host | default('N/A') }}"
           - "   Internal VM IP: http://{{ vm_ip }}"
