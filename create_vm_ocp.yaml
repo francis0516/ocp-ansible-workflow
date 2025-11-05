@@ -96,10 +96,10 @@
                         disk:
                           bus: virtio
                     interfaces:
-                      - name: br-ex-net
+                      - name: default
                         bridge: {}
                 networks:
-                  - name: br-ex-net
+                  - name: default
                     multus:
                       networkName: "{{ vm_project }}/{{ network_attachment }}"
                 volumes:
