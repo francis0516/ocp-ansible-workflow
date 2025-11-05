@@ -1,5 +1,5 @@
 ---
-- name: Create VM on OpenShift Virtualization with IPv4 extraction (Multus + Masquerade)
+- name: Create VM on OpenShift Virtualization with IPv4 extraction
   hosts: localhost
   connection: local
   gather_facts: false
@@ -19,17 +19,16 @@
     cloud_init_password: password
 
     # Network Configuration
-    multus_network: br-ex-network
-    masquerade_network: masq-net  # VirtualMachineInstance Masquerade interface
+    network_attachment: br-ex-network
 
     # Timing Configuration
-    ip_poll_interval: 10
-    max_ip_retries: 18
+    ip_poll_interval: 10        # Seconds between IP checks
+    max_ip_retries: 18          # Max retries (18 * 10 = 3 minutes)
 
   tasks:
-    # ======================================================================
+    # ==========================================================================
     # STEP 1: DISPLAY CONFIGURATION
-    # ======================================================================
+    # ==========================================================================
     - name: Display VM configuration
       debug:
         msg:
@@ -39,13 +38,12 @@
           - "Memory: {{ memory_size }}"
           - "CPU Cores: {{ cpu_cores }}"
           - "Storage Class: {{ storage_class }}"
-          - "Multus Network: {{ multus_network }}"
-          - "Masquerade Network: {{ masquerade_network }}"
+          - "Network: {{ network_attachment }}"
           - "=========================================="
 
-    # ======================================================================
+    # ==========================================================================
     # STEP 2: CREATE VIRTUAL MACHINE
-    # ======================================================================
+    # ==========================================================================
     - name: Provision Virtual Machine in OpenShift
       kubernetes.core.k8s:
         state: present
@@ -99,15 +97,11 @@
                           bus: virtio
                     interfaces:
                       - name: br-ex-net
-                        bridge: {}   # Multus primary
-                      - name: masq-net
-                        masquerade: {}  # Masquerade interface
+                        bridge: {}
                 networks:
                   - name: br-ex-net
                     multus:
-                      networkName: "{{ vm_project }}/{{ multus_network }}"
-                  - name: masq-net
-                    pod: {}  # Masquerade interface
+                      networkName: "{{ vm_project }}/{{ network_attachment }}"
                 volumes:
                   - name: rootdisk
                     dataVolume:
@@ -137,9 +131,9 @@
         msg: "VM {{ vm_name }} provisioned successfully"
       when: vm_creation.changed
 
-    # ======================================================================
+    # ==========================================================================
     # STEP 3: WAIT FOR DATAVOLUME
-    # ======================================================================
+    # ==========================================================================
     - name: Wait for DataVolume to be ready
       kubernetes.core.k8s_info:
         api_version: cdi.kubevirt.io/v1beta1
@@ -158,9 +152,9 @@
       debug:
         msg: "DataVolume ready (Phase: {{ dv_info.resources[0].status.phase }})"
 
-    # ======================================================================
+    # ==========================================================================
     # STEP 4: WAIT FOR VM TO BE RUNNING
-    # ======================================================================
+    # ==========================================================================
     - name: Wait for VM to be running
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
@@ -177,19 +171,18 @@
 
     - name: Display VM running status
       debug:
-        msg: "VM {{ vm_name }} is running, waiting for IPv4 addresses..."
+        msg: "VM {{ vm_name }} is running, waiting for IPv4 address..."
 
-    # ======================================================================
+    # ==========================================================================
     # STEP 5: EXTRACT IPV4 (GUEST AGENT + SSH FALLBACK)
-    # ======================================================================
+    # ==========================================================================
     - name: Initialize IPv4 variables
       set_fact:
-        vm_ipv4_multus: []
-        vm_ipv4_masq: []
-        vm_ip_multus: "No IPv4 assigned"
-        vm_ip_masq: "No IPv4 assigned"
+        vm_ipv4_addresses: []
+        vm_ip: "No IPv4 assigned"
+        all_ips: []
 
-    - name: Poll for VM network info
+    - name: Poll for IPv4 via guest agent
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
         kind: VirtualMachineInstance
@@ -199,41 +192,52 @@
       register: vmi_network_info
       until: >-
         (vmi_network_info.resources | length > 0) and
-        (
-          ((vmi_network_info.resources[0].status.interfaces | default([]) |
-          map(attribute='ipAddresses') | select('defined') |
-          map('flatten') | flatten |
-          select('match', '^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$') | list | length) > 0)
-        )
+        ((vmi_network_info.resources[0].status.interfaces | default([]) |
+        map(attribute='ipAddresses') |
+        select('defined') |
+        map('flatten') |
+        flatten |
+        select('match', '^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$') |
+        list | length) > 0)
       retries: "{{ max_ip_retries }}"
       delay: "{{ ip_poll_interval }}"
       ignore_errors: true
 
-    - name: Extract IPv4 from Multus and Masquerade
+    - name: Extract IPv4 addresses from guest agent
       set_fact:
-        vm_ipv4_multus: >-
+        all_ips: >-
           {{
-            (vmi_network_info.resources[0].status.interfaces | default([]) |
-            selectattr('name','equalto','br-ex-net') | map(attribute='ipAddresses') |
-            select('defined') | map('flatten') | flatten |
-            select('match', '^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$') | list)
+            (vmi_network_info.resources[0].status.interfaces | default([])) |
+            map(attribute='ipAddresses') |
+            select('defined') |
+            map('flatten') |
+            flatten |
+            list
           }}
-        vm_ipv4_masq: >-
+        vm_ipv4_addresses: >-
           {{
-            (vmi_network_info.resources[0].status.interfaces | default([]) |
-            selectattr('name','equalto','masq-net') | map(attribute='ipAddresses') |
-            select('defined') | map('flatten') | flatten |
-            select('match', '^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$') | list)
+            (vmi_network_info.resources[0].status.interfaces | default([])) |
+            map(attribute='ipAddresses') |
+            select('defined') |
+            map('flatten') |
+            flatten |
+            select('match', '^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$') |
+            list
           }}
-        vm_ip_multus: "{{ vm_ipv4_multus[0] | default('No IPv4 assigned') }}"
-        vm_ip_masq: "{{ vm_ipv4_masq[0] | default('No IPv4 assigned') }}"
 
-    # Optional SSH fallback for Masquerade or Multus if guest agent fails
-    - name: SSH fallback if Multus has no IP
+    - name: Display guest agent result
+      debug:
+        msg: "{{ '✓' if vm_ipv4_addresses | length > 0 else '✗' }} Guest agent: {{ vm_ipv4_addresses | join(', ') if vm_ipv4_addresses | length > 0 else 'No IPv4 reported' }}"
+
+    - name: Try SSH fallback if guest agent failed
       block:
-        - name: Get SSH IP
+        - name: Get connection IP for SSH
           set_fact:
             ssh_ip: "{{ vmi_network_info.resources[0].status.interfaces[0].ipAddress | default('') }}"
+
+        - name: Display SSH fallback attempt
+          debug:
+            msg: "Guest agent failed, attempting SSH extraction via {{ ssh_ip }}..."
 
         - name: Wait for SSH to be available
           wait_for:
@@ -247,9 +251,7 @@
 
         - name: Extract IPv4 via SSH
           shell: |
-            sshpass -p '{{ cloud_init_password }}' ssh -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 root@{{ ssh_ip }} \
-            "ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1"
+            sshpass -p '{{ cloud_init_password }}' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 root@{{ ssh_ip }} "ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1"
           register: ssh_ipv4
           when:
             - ssh_ip != ''
@@ -257,48 +259,97 @@
           ignore_errors: true
           changed_when: false
 
-        - name: Update Masquerade IP if empty
+        - name: Store SSH-extracted IPv4
           set_fact:
-            vm_ipv4_masq: ["{{ ssh_ipv4.stdout | trim }}"]
-            vm_ip_masq: "{{ ssh_ipv4.stdout | trim }}"
+            vm_ipv4_addresses: ["{{ ssh_ipv4.stdout | trim }}"]
           when:
-            - vm_ipv4_masq | length == 0
             - ssh_ipv4 is defined
+            - ssh_ipv4.rc is defined
             - ssh_ipv4.rc == 0
             - ssh_ipv4.stdout | trim != ''
-      when: vm_ipv4_masq | length == 0
 
-    - name: Display extracted IPs
+        - name: Display SSH extraction result
+          debug:
+            msg: "{{ '✓' if vm_ipv4_addresses | length > 0 else '✗' }} SSH extraction: {{ vm_ipv4_addresses | join(', ') if vm_ipv4_addresses | length > 0 else 'Failed' }}"
+      when: vm_ipv4_addresses | length == 0
+
+    - name: Set final VM IP
+      set_fact:
+        vm_ip: "{{ vm_ipv4_addresses[0] if vm_ipv4_addresses | length > 0 else 'No IPv4 assigned' }}"
+
+    - name: Display network information
       debug:
         msg:
-          - "=========================================="
-          - "VM Name: {{ vm_name }}"
-          - "Multus IPv4: {{ vm_ip_multus }}"
-          - "All Multus IPs: {{ vm_ipv4_multus | join(', ') }}"
-          - "Masquerade IPv4: {{ vm_ip_masq }}"
-          - "All Masquerade IPs: {{ vm_ipv4_masq | join(', ') }}"
-          - "=========================================="
+          - "================================================"
+          - "Network Information for {{ vm_name }}"
+          - "================================================"
+          - "All IPs detected: {{ all_ips | join(', ') if all_ips | length > 0 else 'None' }}"
+          - "IPv4 addresses: {{ vm_ipv4_addresses | join(', ') }}"
+          - "Selected IPv4: {{ vm_ip }}"
+          - "Detection method: {{ 'Guest Agent' if vm_ipv4_addresses | length > 0 else 'SSH Fallback' }}"
+          - "================================================"
 
-    - name: Fail if no IPv4 obtained
+    - name: Fail if no IPv4 address obtained
       fail:
-        msg: "ERROR: No IPv4 address could be obtained for {{ vm_name }}!"
-      when: vm_ip_multus == 'No IPv4 assigned' and vm_ip_masq == 'No IPv4 assigned'
+        msg: |
+          ========================================
+          ERROR: No IPv4 address could be obtained
+          ========================================
+          
+          VM Name: {{ vm_name }}
+          All IPs: {{ all_ips }}
+          
+          Guest Agent: Failed to report IPv4
+          SSH Fallback: Failed to extract IPv4
+          
+          ROOT CAUSE:
+          Your NetworkAttachmentDefinition is missing the "subnets" field.
+          
+          SOLUTION:
+          1. Update your br-ex-network NAD to include the subnet:
+             
+             oc edit network-attachment-definitions br-ex-network -n {{ vm_project }}
+             
+             Add this line in the config (before closing brace):
+             "subnets":"10.0.0.0/24"
+          
+          2. Delete and restart the VM:
+             oc delete vmi {{ vm_name }} -n {{ vm_project }}
+          
+          3. Verify the fix:
+             oc get vmi {{ vm_name }} -n {{ vm_project }} -o jsonpath='{.status.interfaces[0].ipAddresses}'
+             (Should show: ["10.0.0.X","fe80::..."])
+          
+          4. Run the playbook again
+      when: vm_ip == 'No IPv4 assigned'
 
-    # ======================================================================
-    # STEP 6: EXPORT VARIABLES FOR DOWNSTREAM JOBS
-    # ======================================================================
+    # ==========================================================================
+    # STEP 6: CHECK GUEST AGENT STATUS
+    # ==========================================================================
+    - name: Check guest agent connection status
+      set_fact:
+        guest_agent_connected: >-
+          {{
+            (vmi_network_info.resources[0].status.conditions | default([]) |
+            selectattr('type', 'equalto', 'AgentConnected') |
+            map(attribute='status') | first | default('Unknown'))
+          }}
+
+    # ==========================================================================
+    # STEP 7: EXPORT VARIABLES FOR DOWNSTREAM JOBS
+    # ==========================================================================
     - name: Export variables for workflow
       set_stats:
         data:
-          vm_ip_multus: "{{ vm_ip_multus }}"
-          vm_ip_masq: "{{ vm_ip_masq }}"
+          vm_ip: "{{ vm_ip }}"
+          vm_ipv4: "{{ vm_ipv4_addresses | join(',') }}"
           vm_name: "{{ vm_name }}"
           vm_project: "{{ vm_project }}"
         per_host: no
 
-    # ======================================================================
-    # STEP 7: DISPLAY DEPLOYMENT SUMMARY
-    # ======================================================================
+    # ==========================================================================
+    # STEP 8: DISPLAY DEPLOYMENT SUMMARY
+    # ==========================================================================
     - name: Deployment summary
       debug:
         msg:
@@ -307,11 +358,16 @@
           - "=========================================="
           - "VM Name: {{ vm_name }}"
           - "Namespace: {{ vm_project }}"
-          - "Multus IPv4: {{ vm_ip_multus }}"
-          - "Masquerade IPv4: {{ vm_ip_masq }}"
+          - "IPv4 Address: {{ vm_ip }}"
+          - "All IPv4s: {{ vm_ipv4_addresses | join(', ') }}"
           - "Username: root"
           - "Password: {{ cloud_init_password }}"
+          - "Network: {{ network_attachment }}"
+          - "Guest Agent: {{ guest_agent_connected }}"
+          - "Detection Method: {{ 'Guest Agent ✓' if vm_ipv4_addresses | length > 0 else 'SSH Fallback ⚠' }}"
+          - ""
           - "Exported Variables:"
-          - "  vm_ip_multus: {{ vm_ip_multus }}"
-          - "  vm_ip_masq: {{ vm_ip_masq }}"
+          - "  vm_ip: {{ vm_ip }}"
+          - "  vm_name: {{ vm_name }}"
+          - "  vm_project: {{ vm_project }}"
           - "=========================================="
