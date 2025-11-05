@@ -1,5 +1,5 @@
 ---
-- name: Create VM on OpenShift Virtualization with IPv4 extraction (Multus primary + Masquerade)
+- name: Create VM on OpenShift Virtualization with IPv4 extraction (Multus + Masquerade)
   hosts: localhost
   connection: local
   gather_facts: false
@@ -22,11 +22,10 @@
     network_attachment: br-ex-network
 
     # Timing Configuration
-    ip_poll_interval: 10
-    max_ip_retries: 18
+    ip_poll_interval: 10        # Seconds between IP checks
+    max_ip_retries: 18          # Max retries (18 * 10 = 3 minutes)
 
   tasks:
-    # Display VM configuration
     - name: Display VM configuration
       debug:
         msg:
@@ -36,10 +35,9 @@
           - "Memory: {{ memory_size }}"
           - "CPU Cores: {{ cpu_cores }}"
           - "Storage Class: {{ storage_class }}"
-          - "Networks: {{ network_attachment }} (primary) + Masquerade (secondary)"
+          - "Network: {{ network_attachment }} + Masquerade"
           - "=========================================="
 
-    # Provision VM
     - name: Provision Virtual Machine in OpenShift
       kubernetes.core.k8s:
         state: present
@@ -93,15 +91,15 @@
                           bus: virtio
                     interfaces:
                       - name: br-ex-net
-                        bridge: {}
+                        bridge: {}            # Multus interface
                       - name: default
-                        masquerade: {}
+                        masquerade: {}        # Masquerade interface
                 networks:
                   - name: br-ex-net
                     multus:
                       networkName: "{{ vm_project }}/{{ network_attachment }}"
                   - name: default
-                    pod: {}
+                    pod: {}                 # Masquerade network
                 volumes:
                   - name: rootdisk
                     dataVolume:
@@ -112,9 +110,9 @@
                         version: 2
                         ethernets:
                           eth0:
-                            dhcp4: true   # Multus (primary)
+                            dhcp4: true
                           eth1:
-                            dhcp4: true   # Masquerade (secondary)
+                            dhcp4: true
                       userData: |
                         #cloud-config
                         user: root
@@ -133,7 +131,9 @@
         msg: "VM {{ vm_name }} provisioned successfully"
       when: vm_creation.changed
 
-    # Wait for DataVolume
+    # --------------------------------------------------------------------------
+    # DataVolume check
+    # --------------------------------------------------------------------------
     - name: Wait for DataVolume to be ready
       kubernetes.core.k8s_info:
         api_version: cdi.kubevirt.io/v1beta1
@@ -152,7 +152,9 @@
       debug:
         msg: "DataVolume ready (Phase: {{ dv_info.resources[0].status.phase }})"
 
-    # Wait for VM to be running
+    # --------------------------------------------------------------------------
+    # VM Running check
+    # --------------------------------------------------------------------------
     - name: Wait for VM to be running
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
@@ -169,16 +171,17 @@
 
     - name: Display VM running status
       debug:
-        msg: "VM {{ vm_name }} is running, waiting for IPv4 addresses..."
+        msg: "VM {{ vm_name }} is running, waiting for IPv4 address..."
 
-    # Initialize IPv4 variables
+    # --------------------------------------------------------------------------
+    # IPv4 extraction
+    # --------------------------------------------------------------------------
     - name: Initialize IPv4 variables
       set_fact:
         vm_ipv4_addresses: []
         vm_ip: "No IPv4 assigned"
         all_ips: []
 
-    # Poll for IPv4 via guest agent
     - name: Poll for IPv4 via guest agent
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
@@ -200,8 +203,7 @@
       delay: "{{ ip_poll_interval }}"
       ignore_errors: true
 
-    # Extract IPv4 addresses
-    - name: Extract all IPv4 addresses
+    - name: Extract IPv4 addresses from guest agent
       set_fact:
         all_ips: >-
           {{
@@ -223,60 +225,7 @@
             list
           }}
 
-    # Set Multus IP as primary
-    - name: Set primary VM IP (Multus)
+    - name: Set final VM IP
       set_fact:
-        vm_ip: >-
-          {{
-            vmi_network_info.resources[0].status.interfaces |
-            selectattr('name','equalto','br-ex-net') |
-            map(attribute='ipAddresses') | flatten | first
-          }}
-
-    - name: Display network information
-      debug:
-        msg:
-          - "================================================"
-          - "Network Information for {{ vm_name }}"
-          - "================================================"
-          - "All IPs detected: {{ all_ips | join(', ') if all_ips | length > 0 else 'None' }}"
-          - "IPv4 addresses: {{ vm_ipv4_addresses | join(', ') }}"
-          - "Selected Multus IPv4 (primary): {{ vm_ip }}"
-          - "================================================"
-
-    # Guest agent connection
-    - name: Check guest agent connection status
-      set_fact:
-        guest_agent_connected: >-
-          {{
-            (vmi_network_info.resources[0].status.conditions | default([]) |
-            selectattr('type', 'equalto', 'AgentConnected') |
-            map(attribute='status') | first | default('Unknown'))
-          }}
-
-    # Export variables
-    - name: Export variables for workflow
-      set_stats:
-        data:
-          vm_ip: "{{ vm_ip }}"
-          vm_ipv4: "{{ vm_ipv4_addresses | join(',') }}"
-          vm_name: "{{ vm_name }}"
-          vm_project: "{{ vm_project }}"
-        per_host: no
-
-    # Deployment summary
-    - name: Deployment summary
-      debug:
-        msg:
-          - "=========================================="
-          - "VM Deployment Complete!"
-          - "=========================================="
-          - "VM Name: {{ vm_name }}"
-          - "Namespace: {{ vm_project }}"
-          - "Primary IPv4 (Multus): {{ vm_ip }}"
-          - "All IPv4s: {{ vm_ipv4_addresses | join(', ') }}"
-          - "Username: root"
-          - "Password: {{ cloud_init_password }}"
-          - "Networks: {{ network_attachment }} (primary) + Masquerade (secondary)"
-          - "Guest Agent: {{ guest_agent_connected }}"
-          - "=========================================="
+        vm_ip: "{{ vm_ipv4_addresses[0] if vm_ipv4_addresses | length > 0 else 'No IPv4 assigned' }}"
+...
