@@ -19,17 +19,16 @@
     cloud_init_password: password
 
     # Network Configuration
-    network_attachment: br-ex-network  # Multus network
-    masquerade_network: default        # Masquerade (Pod network)
+    network_attachment: br-ex-network
 
     # Timing Configuration
-    ip_poll_interval: 10        # Seconds between IP checks
-    max_ip_retries: 18          # Max retries (18 * 10 = 3 minutes)
+    ip_poll_interval: 10
+    max_ip_retries: 18
 
   tasks:
-    # ==========================================================================
+    # ========================================================================
     # STEP 1: DISPLAY CONFIGURATION
-    # ==========================================================================
+    # ========================================================================
     - name: Display VM configuration
       debug:
         msg:
@@ -39,13 +38,12 @@
           - "Memory: {{ memory_size }}"
           - "CPU Cores: {{ cpu_cores }}"
           - "Storage Class: {{ storage_class }}"
-          - "Network (Multus): {{ network_attachment }}"
-          - "Network (Masquerade): {{ masquerade_network }}"
+          - "Network: {{ network_attachment }} + Masquerade"
           - "=========================================="
 
-    # ==========================================================================
-    # STEP 2: CREATE VIRTUAL MACHINE
-    # ==========================================================================
+    # ========================================================================
+    # STEP 2: CREATE VIRTUAL MACHINE (Multus + Masquerade)
+    # ========================================================================
     - name: Provision Virtual Machine in OpenShift
       kubernetes.core.k8s:
         state: present
@@ -99,15 +97,15 @@
                           bus: virtio
                     interfaces:
                       - name: br-ex-net
-                        bridge: {}
+                        bridge: {}  # Multus network
                       - name: masq-net
-                        masquerade: {}  # Masquerade interface
+                        masquerade: {}  # Pod network / masquerade
                 networks:
                   - name: br-ex-net
                     multus:
                       networkName: "{{ vm_project }}/{{ network_attachment }}"
                   - name: masq-net
-                    pod: {}   # Masquerade network
+                    pod: {}
                 volumes:
                   - name: rootdisk
                     dataVolume:
@@ -118,9 +116,9 @@
                         version: 2
                         ethernets:
                           eth0:
-                            dhcp4: true   # Multus
+                            dhcp4: true
                           eth1:
-                            dhcp4: true   # Masquerade
+                            dhcp4: true
                       userData: |
                         #cloud-config
                         user: root
@@ -139,9 +137,9 @@
         msg: "VM {{ vm_name }} provisioned successfully"
       when: vm_creation.changed
 
-    # ==========================================================================
+    # ========================================================================
     # STEP 3: WAIT FOR DATAVOLUME
-    # ==========================================================================
+    # ========================================================================
     - name: Wait for DataVolume to be ready
       kubernetes.core.k8s_info:
         api_version: cdi.kubevirt.io/v1beta1
@@ -160,9 +158,9 @@
       debug:
         msg: "DataVolume ready (Phase: {{ dv_info.resources[0].status.phase }})"
 
-    # ==========================================================================
+    # ========================================================================
     # STEP 4: WAIT FOR VM TO BE RUNNING
-    # ==========================================================================
+    # ========================================================================
     - name: Wait for VM to be running
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
@@ -179,16 +177,18 @@
 
     - name: Display VM running status
       debug:
-        msg: "VM {{ vm_name }} is running, waiting for IPv4 address..."
+        msg: "VM {{ vm_name }} is running, waiting for IPv4 addresses..."
 
-    # ==========================================================================
-    # STEP 5: EXTRACT IPV4 (PREFER MASQUERADE)
-    # ==========================================================================
+    # ========================================================================
+    # STEP 5: EXTRACT IPV4 (MASQUERADE + MULTUS)
+    # ========================================================================
     - name: Initialize IPv4 variables
       set_fact:
-        vm_ipv4_addresses: []
-        vm_ip: "No IPv4 assigned"
         all_ips: []
+        vm_ipv4_multus: []
+        vm_ipv4_masquerade: []
+        vm_ip_multus: "No IPv4 assigned"
+        vm_ip_masquerade: "No IPv4 assigned"
 
     - name: Extract IPv4 addresses from guest agent
       set_fact:
@@ -201,8 +201,18 @@
             flatten |
             list
           }}
-        # Prefer Masquerade interface (eth1 / masq-net)
-        vm_ipv4_addresses: >-
+        vm_ipv4_multus: >-
+          {{
+            (vmi_info.resources[0].status.interfaces | default([])) |
+            selectattr('name','equalto','br-ex-net') |
+            map(attribute='ipAddresses') |
+            select('defined') |
+            map('flatten') |
+            flatten |
+            select('match', '^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$') |
+            list
+          }}
+        vm_ipv4_masquerade: >-
           {{
             (vmi_info.resources[0].status.interfaces | default([])) |
             selectattr('name','equalto','masq-net') |
@@ -214,9 +224,10 @@
             list
           }}
 
-    - name: Set final VM IP
+    - name: Set final VM IPs
       set_fact:
-        vm_ip: "{{ vm_ipv4_addresses[0] if vm_ipv4_addresses | length > 0 else 'No IPv4 assigned' }}"
+        vm_ip_multus: "{{ vm_ipv4_multus[0] if vm_ipv4_multus | length > 0 else 'No IPv4 assigned' }}"
+        vm_ip_masquerade: "{{ vm_ipv4_masquerade[0] if vm_ipv4_masquerade | length > 0 else 'No IPv4 assigned' }}"
 
     - name: Display network information
       debug:
@@ -225,23 +236,66 @@
           - "Network Information for {{ vm_name }}"
           - "================================================"
           - "All IPs detected: {{ all_ips | join(', ') if all_ips | length > 0 else 'None' }}"
-          - "IPv4 addresses (Masquerade preferred): {{ vm_ipv4_addresses | join(', ') }}"
-          - "Selected IPv4: {{ vm_ip }}"
+          - "Multus IPv4 (br-ex-net): {{ vm_ipv4_multus | join(', ') }}"
+          - "Masquerade IPv4 (masq-net): {{ vm_ipv4_masquerade | join(', ') }}"
+          - "Selected Multus IPv4: {{ vm_ip_multus }}"
+          - "Selected Masquerade IPv4: {{ vm_ip_masquerade }}"
           - "================================================"
 
     - name: Fail if no IPv4 address obtained
       fail:
         msg: "ERROR: No IPv4 address could be obtained for {{ vm_name }}!"
-      when: vm_ip == 'No IPv4 assigned'
+      when: vm_ip_multus == 'No IPv4 assigned' and vm_ip_masquerade == 'No IPv4 assigned'
 
-    # ==========================================================================
-    # STEP 6: EXPORT VARIABLES
-    # ==========================================================================
+    # ========================================================================
+    # STEP 6: CHECK GUEST AGENT STATUS
+    # ========================================================================
+    - name: Check guest agent connection status
+      set_fact:
+        guest_agent_connected: >-
+          {{
+            (vmi_info.resources[0].status.conditions | default([]) |
+            selectattr('type', 'equalto', 'AgentConnected') |
+            map(attribute='status') | first | default('Unknown'))
+          }}
+
+    # ========================================================================
+    # STEP 7: EXPORT VARIABLES FOR DOWNSTREAM JOBS
+    # ========================================================================
     - name: Export variables for workflow
       set_stats:
         data:
-          vm_ip: "{{ vm_ip }}"
-          vm_ipv4: "{{ vm_ipv4_addresses | join(',') }}"
+          vm_ip_multus: "{{ vm_ip_multus }}"
+          vm_ip_masquerade: "{{ vm_ip_masquerade }}"
+          vm_ipv4_multus: "{{ vm_ipv4_multus | join(',') }}"
+          vm_ipv4_masquerade: "{{ vm_ipv4_masquerade | join(',') }}"
           vm_name: "{{ vm_name }}"
           vm_project: "{{ vm_project }}"
         per_host: no
+
+    # ========================================================================
+    # STEP 8: DISPLAY DEPLOYMENT SUMMARY
+    # ========================================================================
+    - name: Deployment summary
+      debug:
+        msg:
+          - "=========================================="
+          - "VM Deployment Complete!"
+          - "=========================================="
+          - "VM Name: {{ vm_name }}"
+          - "Namespace: {{ vm_project }}"
+          - "Multus IPv4: {{ vm_ip_multus }}"
+          - "Masquerade IPv4: {{ vm_ip_masquerade }}"
+          - "All IPv4s: {{ all_ips | join(', ') }}"
+          - "Username: root"
+          - "Password: {{ cloud_init_password }}"
+          - "Network: {{ network_attachment }} + Masquerade"
+          - "Guest Agent: {{ guest_agent_connected }}"
+          - "Detection Method: {{ 'Guest Agent ✓' if vm_ipv4_multus | length > 0 or vm_ipv4_masquerade | length > 0 else 'SSH Fallback ⚠' }}"
+          - ""
+          - "Exported Variables:"
+          - "  vm_ip_multus: {{ vm_ip_multus }}"
+          - "  vm_ip_masquerade: {{ vm_ip_masquerade }}"
+          - "  vm_name: {{ vm_name }}"
+          - "  vm_project: {{ vm_project }}"
+          - "=========================================="
