@@ -16,7 +16,87 @@
         msg: "VM Labels: {{ vm_info.resources[0].metadata.labels }}"
       when: vm_info.resources | length > 0
 
-    - name: Create Service for Apache VM
+    - name: Get VirtualMachineInstance to find VM IP
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        name: "{{ vm_name | default('apache-vm') }}"
+        namespace: "{{ vm_namespace | default('vm-migration-test') }}"
+      register: vmi_info
+      ignore_errors: yes
+
+    - name: Extract VM IP address
+      set_fact:
+        vm_ip: "{{ vmi_info.resources[0].status.interfaces[0].ipAddress }}"
+      when: 
+        - vmi_info.resources | length > 0
+        - vmi_info.resources[0].status.interfaces is defined
+        - vmi_info.resources[0].status.interfaces | length > 0
+
+    - name: Display VM IP
+      debug:
+        msg: "VM IP Address: {{ vm_ip }}"
+      when: vm_ip is defined
+
+    - name: Fail if VM IP not found
+      fail:
+        msg: "Could not determine VM IP address. Make sure the VM is running."
+      when: vm_ip is not defined
+
+    - name: Create Socat Proxy Deployment for Apache VM
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: "{{ vm_name | default('apache-vm') }}-socat-proxy"
+            namespace: "{{ vm_namespace | default('vm-migration-test') }}"
+            labels:
+              app: "{{ vm_name | default('apache-vm') }}-socat-proxy"
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: "{{ vm_name | default('apache-vm') }}-socat-proxy"
+            template:
+              metadata:
+                labels:
+                  app: "{{ vm_name | default('apache-vm') }}-socat-proxy"
+              spec:
+                containers:
+                - name: socat
+                  image: alpine/socat:latest
+                  args:
+                    - "TCP-LISTEN:80,fork,reuseaddr"
+                    - "TCP:{{ vm_ip }}:80"
+                  ports:
+                    - containerPort: 80
+                      name: http
+                      protocol: TCP
+                  resources:
+                    requests:
+                      memory: "64Mi"
+                      cpu: "100m"
+                    limits:
+                      memory: "128Mi"
+                      cpu: "200m"
+
+    - name: Wait for Socat Proxy Deployment to be ready
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: "{{ vm_name | default('apache-vm') }}-socat-proxy"
+        namespace: "{{ vm_namespace | default('vm-migration-test') }}"
+      register: deployment_info
+      until: 
+        - deployment_info.resources | length > 0
+        - deployment_info.resources[0].status.readyReplicas is defined
+        - deployment_info.resources[0].status.readyReplicas == 1
+      retries: 30
+      delay: 2
+
+    - name: Create Service for Socat Proxy
       kubernetes.core.k8s:
         state: present
         definition:
@@ -29,7 +109,7 @@
               app: "{{ vm_name | default('apache-vm') }}"
           spec:
             selector:
-              vm.kubevirt.io/name: "{{ vm_name | default('apache-vm') }}"
+              app: "{{ vm_name | default('apache-vm') }}-socat-proxy"
             ports:
               - name: http
                 protocol: TCP
@@ -56,7 +136,7 @@
 
     - name: Display warning if no endpoints found
       debug:
-        msg: "Warning: No endpoints found! Check if VM selector matches."
+        msg: "Warning: No endpoints found! Check if socat proxy deployment is running."
       when: 
         - service_endpoints.resources | length == 0 or 
           service_endpoints.resources[0].subsets is not defined or
@@ -108,7 +188,7 @@
       debug:
         msg:
           - "==========================================================================================================================================="
-          - "Henogez WebServer Route Created Successfully!"
+          - "Henogez WebServer Route Created Successfully with Socat Proxy!"
           - "==========================================================================================================================================="
           - "   Access your web server at:"
           - ""
@@ -119,20 +199,28 @@
           - "   http://{{ route_info.resources[0].spec.host }}"
           - ""
           - "   Internal Service:"
-          - "   http://{{ vm_name | default('apache-vm') }}-service.{{ vm_namespace | default('vm-migration') }}.svc.cluster.local"
+          - "   http://{{ vm_name | default('apache-vm') }}-service.{{ vm_namespace | default('vm-migration-test') }}.svc.cluster.local"
           - ""
           - "   Resource Details:"
           - "   VM Name: {{ vm_name | default('apache-vm') }}"
+          - "   VM IP: {{ vm_ip }}"
           - "   Namespace: {{ vm_namespace | default('vm-migration-test') }}"
+          - "   Socat Proxy: {{ vm_name | default('apache-vm') }}-socat-proxy"
           - "   Service: {{ vm_name | default('apache-vm') }}-service"
           - "   Route: {{ vm_name | default('apache-vm') }}-route"
           - ""
           - "   Route Status:"
           - "   Admitted: {{ route_status.resources[0].status.ingress[0].conditions[0].status | default('Unknown') }}"
           - ""
+          - "   Architecture:"
+          - "   Route -> Service -> Socat Proxy Pod -> VM ({{ vm_ip }}:80)"
+          - ""
           - "   Troubleshooting Commands:"
+          - "   oc get deployment {{ vm_name | default('apache-vm') }}-socat-proxy -n {{ vm_namespace | default('vm-migration-test') }}"
+          - "   oc get pods -l app={{ vm_name | default('apache-vm') }}-socat-proxy -n {{ vm_namespace | default('vm-migration-test') }}"
+          - "   oc logs -l app={{ vm_name | default('apache-vm') }}-socat-proxy -n {{ vm_namespace | default('vm-migration-test') }}"
           - "   oc get svc {{ vm_name | default('apache-vm') }}-service -n {{ vm_namespace | default('vm-migration-test') }}"
           - "   oc get endpoints {{ vm_name | default('apache-vm') }}-service -n {{ vm_namespace | default('vm-migration-test') }}"
-          - "   oc get route {{ vm_name | default('ginger-vm') }}-route -n {{ vm_namespace | default('vm-migration') }}"
+          - "   oc get route {{ vm_name | default('apache-vm') }}-route -n {{ vm_namespace | default('vm-migration-test') }}"
           - "   curl -k https://{{ route_info.resources[0].spec.host }}"
           - "==================================================================================================================================================="
